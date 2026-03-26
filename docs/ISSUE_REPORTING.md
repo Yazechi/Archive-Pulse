@@ -11,9 +11,9 @@ Check these first:
 
 Relevant docs:
 
-- [README](/D:/The%20Archive/README.md)
-- [Usage Guide](/D:/The%20Archive/docs/USAGE.md)
-- [Architecture](/D:/The%20Archive/docs/ARCHITECTURE.md)
+- [README](../README.md)
+- [Usage Guide](./USAGE.md)
+- [Architecture](./ARCHITECTURE.md)
 
 ## Important known cases
 
@@ -57,3 +57,4 @@ Be explicit about the source involved:
 - music: local or YouTube-backed
 - books: local `EPUB` / `PDF`, OpenLibrary, or Gutenberg
 - manga: MangaDex or Jikan / MyAnimeList fallback
+

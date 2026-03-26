@@ -242,10 +242,10 @@ npm run build
 
 Start here:
 
-- [Usage Guide](/D:/The%20Archive/docs/USAGE.md)
-- [Architecture](/D:/The%20Archive/docs/ARCHITECTURE.md)
-- [Contributing](/D:/The%20Archive/docs/CONTRIBUTING.md)
-- [Issue Reporting](/D:/The%20Archive/docs/ISSUE_REPORTING.md)
+- [Usage Guide](docs/USAGE.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Contributing](docs/CONTRIBUTING.md)
+- [Issue Reporting](docs/ISSUE_REPORTING.md)
 
 ## Git and first commit
 
@@ -278,5 +278,6 @@ Do not commit:
 
 See:
 
-- [`.gitignore`](/D:/The%20Archive/.gitignore)
-- [`frontend/.gitignore`](/D:/The%20Archive/frontend/.gitignore)
+- [`.gitignore`](.gitignore)
+- [`frontend/.gitignore`](frontend/.gitignore)
+

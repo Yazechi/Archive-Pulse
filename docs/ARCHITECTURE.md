@@ -21,8 +21,8 @@ The backend handles:
 
 Key files:
 
-- [`server.js`](/D:/The%20Archive/server.js)
-- [`database/schema.sql`](/D:/The%20Archive/database/schema.sql)
+- [`server.js`](../server.js)
+- [`database/schema.sql`](../database/schema.sql)
 
 ## Frontend flow
 
@@ -36,11 +36,11 @@ The frontend handles:
 
 Key files:
 
-- [`frontend/src/App.jsx`](/D:/The%20Archive/frontend/src/App.jsx)
-- [`frontend/src/context/MusicContext.jsx`](/D:/The%20Archive/frontend/src/context/MusicContext.jsx)
-- [`frontend/src/components/MainPlayer.jsx`](/D:/The%20Archive/frontend/src/components/MainPlayer.jsx)
-- [`frontend/src/components/Player.jsx`](/D:/The%20Archive/frontend/src/components/Player.jsx)
-- [`frontend/src/components/visualizers/Spectrum3DCanvas.jsx`](/D:/The%20Archive/frontend/src/components/visualizers/Spectrum3DCanvas.jsx)
+- [`frontend/src/App.jsx`](../frontend/src/App.jsx)
+- [`frontend/src/context/MusicContext.jsx`](../frontend/src/context/MusicContext.jsx)
+- [`frontend/src/components/MainPlayer.jsx`](../frontend/src/components/MainPlayer.jsx)
+- [`frontend/src/components/Player.jsx`](../frontend/src/components/Player.jsx)
+- [`frontend/src/components/visualizers/Spectrum3DCanvas.jsx`](../frontend/src/components/visualizers/Spectrum3DCanvas.jsx)
 
 ## Manga provider notes
 
@@ -57,3 +57,4 @@ The backend currently uses:
 
 - OpenLibrary
 - Gutenberg for downloading the epubs directly into the website.
+

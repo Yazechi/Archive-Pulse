@@ -4,10 +4,10 @@
 
 Read these first:
 
-- [README](/D:/The%20Archive/README.md)
-- [Architecture](/D:/The%20Archive/docs/ARCHITECTURE.md)
-- [Usage Guide](/D:/The%20Archive/docs/USAGE.md)
-- [Issue Reporting](/D:/The%20Archive/docs/ISSUE_REPORTING.md)
+- [README](../README.md)
+- [Architecture](./ARCHITECTURE.md)
+- [Usage Guide](./USAGE.md)
+- [Issue Reporting](./ISSUE_REPORTING.md)
 
 ## Setup
 
@@ -85,3 +85,4 @@ If you fix a bug that users commonly hit, include:
 - root cause summary
 - validation performed
 - docs update if the behavior is provider-specific or environment-specific
+
