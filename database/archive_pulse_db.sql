@@ -40,6 +40,23 @@ CREATE TABLE `books` (
 
 -- --------------------------------------------------------
 
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `book_highlights`
+--
+
+CREATE TABLE `book_highlights` (
+  `id` int(11) NOT NULL,
+  `book_id` int(11) NOT NULL,
+  `format` enum('epub','pdf') NOT NULL,
+  `locator` varchar(512) NOT NULL,
+  `text_excerpt` varchar(1000) NOT NULL,
+  `color` varchar(24) NOT NULL DEFAULT '#fde047',
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
 --
 -- Table structure for table `playlists`
 --
@@ -111,6 +128,14 @@ ALTER TABLE `books`
   ADD UNIQUE KEY `unique_source_url` (`source_url`(255));
 
 --
+-- Indexes for table `book_highlights`
+--
+ALTER TABLE `book_highlights`
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `unique_book_highlight` (`book_id`,`format`,`locator`(255),`text_excerpt`(255)),
+  ADD KEY `idx_book_highlights_book` (`book_id`);
+
+--
 -- Indexes for table `playlists`
 --
 ALTER TABLE `playlists`
@@ -144,7 +169,13 @@ ALTER TABLE `songs`
 -- AUTO_INCREMENT for table `books`
 --
 ALTER TABLE `books`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=19;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=20;
+
+--
+-- AUTO_INCREMENT for table `book_highlights`
+--
+ALTER TABLE `book_highlights`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=6;
 
 --
 -- AUTO_INCREMENT for table `playlists`
@@ -162,11 +193,17 @@ ALTER TABLE `series`
 -- AUTO_INCREMENT for table `songs`
 --
 ALTER TABLE `songs`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=27;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=49;
 
 --
 -- Constraints for dumped tables
 --
+
+--
+-- Constraints for table `book_highlights`
+--
+ALTER TABLE `book_highlights`
+  ADD CONSTRAINT `book_highlights_ibfk_1` FOREIGN KEY (`book_id`) REFERENCES `books` (`id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `playlist_songs`
