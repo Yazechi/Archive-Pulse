@@ -1,76 +1,148 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
 
 const Sidebar = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 1023px)').matches);
+  const [isCollapsed, setIsCollapsed] = useState(() => {
+    return localStorage.getItem('sidebar-collapsed') === 'true';
+  });
+  const [isMobileOpen, setIsMobileOpen] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1023px)');
+    const onChange = (event) => {
+      setIsMobile(event.matches);
+      if (!event.matches) setIsMobileOpen(false);
+    };
+    setIsMobile(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('sidebar-collapsed', isCollapsed);
+    window.dispatchEvent(new CustomEvent('sidebar:toggle', { detail: { isCollapsed } }));
+  }, [isCollapsed]);
 
   const navItems = [
-    { name: 'Home', icon: 'dashboard', path: '/' },
-    { name: 'Music', icon: 'music_note', path: '/music' },
-    { name: 'Collections', icon: 'library_music', path: '/playlists' },
-    { name: 'Library', icon: 'menu_book', path: '/books' },
-    { name: 'Search', icon: 'search', path: '/search' },
-    { name: 'Upload', icon: 'cloud_upload', path: '/upload' },
+    { name: 'Dashboard', icon: 'dashboard', path: '/' },
+    { name: 'Music Library', icon: 'library_music', path: '/music' },
+    { name: 'Collections', icon: 'auto_awesome_motion', path: '/playlists' },
+    { name: 'Literature', icon: 'menu_book', path: '/books' },
+    { name: 'Discovery', icon: 'explore', path: '/search' },
+    { name: 'Data Entry', icon: 'upload_file', path: '/upload' },
   ];
 
+  if (location.pathname === '/reader') return null;
+
   return (
-    <aside className="fixed left-0 top-0 h-full w-20 md:w-64 z-[70] bg-[#071221]/55 backdrop-blur-3xl border-r border-white/10 flex flex-col py-10 px-4 transition-all duration-700 ease-in-out">
-      
+    <>
+      {isMobile && (
+        <>
+          <button
+            onClick={() => setIsMobileOpen((value) => !value)}
+            className="fixed top-4 left-4 z-[170] w-10 h-10 rounded-xl border border-white/15 bg-bg-dark/75 backdrop-blur-xl text-white grid place-items-center"
+            aria-label="Toggle navigation"
+          >
+            <span className="material-symbols-outlined text-[20px]">{isMobileOpen ? 'close' : 'menu'}</span>
+          </button>
+          <div
+            className={`fixed inset-0 z-[145] bg-black/55 backdrop-blur-sm transition-opacity duration-250 ${
+              isMobileOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+            }`}
+            onClick={() => setIsMobileOpen(false)}
+          />
+        </>
+      )}
+
+      <aside 
+        className={`fixed left-0 top-0 h-full z-[150] bg-bg-dark/75 backdrop-blur-2xl border-r border-border/80 flex flex-col transition-all duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] shadow-[12px_0_40px_rgba(0,0,0,0.35)] ${
+          isMobile
+            ? `w-72 max-w-[82vw] ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'}`
+            : isCollapsed
+              ? 'w-20'
+              : 'w-64'
+        }`}
+      >
       {/* Brand */}
-      <div className="mb-16 px-4 flex items-center gap-4 group cursor-pointer" onClick={() => navigate('/')}>
-        <div className="w-12 h-12 bg-gradient-to-br from-primary via-primary-light to-secondary flex items-center justify-center rounded-[1.25rem] shrink-0 shadow-[0_0_40px_rgba(101,216,255,0.2)] group-hover:scale-110 group-hover:shadow-[0_0_60px_rgba(101,216,255,0.35)] transition-all duration-700">
-          <span className="material-symbols-outlined text-black text-2xl font-bold">all_inclusive</span>
+      <div 
+        className="h-20 flex items-center px-4 cursor-pointer group shrink-0"
+        onClick={() => navigate('/')}
+      >
+        <div className="w-10 h-10 bg-primary/12 border border-primary/35 flex items-center justify-center rounded-xl group-hover:scale-110 transition-transform">
+          <span className="material-symbols-outlined text-primary font-bold">all_inclusive</span>
         </div>
-        <div className="hidden md:block">
-          <h1 className="font-headline italic text-2xl tracking-tighter leading-none text-white group-hover:text-primary transition-colors duration-500">Archive Pulse</h1>
-          <p className="font-body uppercase tracking-[0.4em] text-[8px] text-primary mt-1.5 font-black opacity-60 group-hover:opacity-100 transition-opacity">Digital Curator</p>
-        </div>
+        {!isCollapsed && (
+          <div className="ml-4">
+            <h1 className="font-display text-lg tracking-tight text-white">ARCHIVE</h1>
+            <p className="tech-label-sm text-primary/70">Pulse Engine</p>
+          </div>
+        )}
       </div>
 
       {/* Navigation */}
-      <nav className="space-y-2 flex-grow">
+      <nav className="flex-1 py-4 space-y-1.5 overflow-y-auto scrollbar-none px-2.5">
         {navItems.map((item) => {
           const isActive = location.pathname === item.path;
           return (
             <Link
               key={item.name}
               to={item.path}
-              className={`flex items-center gap-5 px-5 py-4 rounded-[1.5rem] transition-all duration-500 group relative overflow-hidden ${
-                isActive 
-                  ? "text-black scale-[1.02]" 
-                  : "text-white/40 hover:bg-white/[0.03] hover:text-white"
+              onClick={() => isMobile && setIsMobileOpen(false)}
+              className={`flex items-center h-11 px-4 rounded-xl transition-all duration-300 group relative ${
+                isActive ? "bg-primary/12 text-primary border border-primary/25 shadow-[0_8px_30px_var(--color-primary-dim)]" : "text-text-secondary hover:text-white hover:bg-white/[0.04] border border-transparent"
               }`}
             >
-              <span className={`material-symbols-outlined text-2xl relative z-10 ${isActive ? 'font-variation-settings-fill-1' : 'group-hover:scale-110 transition-transform duration-500'}`}>
+              <span className={`material-symbols-outlined text-[22px] transition-transform ${isActive ? 'active-icon' : 'group-hover:scale-110'}`}>
                 {item.icon}
               </span>
-              <span className="font-body uppercase tracking-[0.2em] text-[10px] font-black hidden md:block relative z-10">
-                {item.name}
-              </span>
+              {(!isCollapsed || isMobile) && (
+                <span className="ml-4 font-medium text-[13px] tracking-tight transition-opacity truncate">
+                  {item.name}
+                </span>
+              )}
               {isActive && (
-                <div className="absolute inset-0 bg-gradient-to-r from-cyan-50 to-cyan-100/90 shadow-[0_10px_30px_rgba(114,227,255,0.18)]" />
+                <div className="absolute left-0 top-2 bottom-2 w-1 bg-primary rounded-full shadow-[0_0_12px_var(--color-primary)]" />
               )}
             </Link>
           );
         })}
       </nav>
 
-      {/* User / Profile */}
-      <Link to="/profile" className="mt-auto group flex items-center gap-4 bg-white/[0.02] border border-white/5 p-4 rounded-[2rem] transition-all duration-500 hover:bg-white/[0.05] hover:border-white/10 hover:-translate-y-1">
-        <div className="w-12 h-12 rounded-[1.25rem] bg-[#0a0a0a] overflow-hidden shrink-0 border border-white/10 group-hover:border-primary/50 transition-all duration-500 relative">
-          <img
-            alt="Profile"
-            className="w-full h-full object-cover grayscale group-hover:grayscale-0 group-hover:scale-110 transition-all duration-700"
-            src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop"
-          />
-          <div className="absolute inset-0 bg-primary/20 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-        </div>
-        <div className="hidden md:block overflow-hidden">
-          <p className="text-[10px] uppercase tracking-[0.15em] font-black text-white group-hover:text-primary transition-colors">Curator</p>
-          <p className="text-[8px] uppercase tracking-[0.2em] text-white/30 group-hover:text-white/50 transition-colors mt-1">System Admin</p>
-        </div>
-      </Link>
-    </aside>
+      <div className="p-3 border-t border-border/80 bg-bg-dark/40 pb-28">
+        <button 
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          disabled={isMobile}
+          className="w-full h-10 rounded-xl border border-border flex items-center justify-center text-text-muted hover:text-white hover:bg-white/5 transition-all mb-3"
+        >
+          <span className="material-symbols-outlined text-lg">
+            {isCollapsed ? 'side_navigation' : 'keyboard_double_arrow_left'}
+          </span>
+        </button>
+
+        <Link 
+          to="/profile" 
+          className="flex items-center p-2.5 rounded-2xl bg-white/[0.02] border border-border hover:bg-white/5 hover:border-border-hover transition-all group"
+        >
+          <div className="w-9 h-9 bg-zinc-800 rounded-xl overflow-hidden shrink-0 relative border border-white/10">
+            <img 
+              src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=64&auto=format&fit=crop"
+              className="w-full h-full object-cover grayscale opacity-50 group-hover:opacity-100 group-hover:grayscale-0 transition-all"
+              alt=""
+            />
+          </div>
+          {(!isCollapsed || isMobile) && (
+            <div className="ml-3 overflow-hidden">
+              <p className="text-[12px] font-semibold text-white truncate">Curator</p>
+              <p className="tech-label-sm text-primary uppercase mt-0.5">Admin Access</p>
+            </div>
+          )}
+        </Link>
+      </div>
+      </aside>
+    </>
   );
 };
 

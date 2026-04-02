@@ -80,6 +80,20 @@ const initDb = async () => {
         UNIQUE KEY unique_source_url (source_url(255))
       )
     `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS book_highlights (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        book_id INT NOT NULL,
+        format ENUM('epub', 'pdf') NOT NULL,
+        locator VARCHAR(512) NOT NULL,
+        text_excerpt VARCHAR(1000) NOT NULL,
+        color VARCHAR(24) NOT NULL DEFAULT '#fde047',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_book_highlights_book (book_id),
+        UNIQUE KEY unique_book_highlight (book_id, format, locator(255), text_excerpt(255)),
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+      )
+    `);
 
     await conn.query(`
       CREATE TABLE IF NOT EXISTS series (
@@ -627,6 +641,17 @@ app.get('/api/books', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/books/by-id/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [rows] = await pool.query('SELECT * FROM books WHERE id = ? LIMIT 1', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Book not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/books/add', async (req, res) => {
   let { title, author, thumbnail_url, source, source_url, type } = req.body;
   try {
@@ -747,7 +772,11 @@ app.put('/api/books/:id/progress', async (req, res) => {
   try {
     const updates = [];
     const values = [];
-    if (progress !== undefined) { updates.push('progress = ?'); values.push(progress); }
+    if (progress !== undefined) {
+      const normalizedProgress = Math.max(0, Math.min(100, Number(progress) || 0));
+      updates.push('progress = ?');
+      values.push(normalizedProgress);
+    }
     if (last_page !== undefined) { updates.push('last_page = ?'); values.push(last_page); }
     if (total_pages !== undefined) { updates.push('total_pages = ?'); values.push(total_pages); }
     if (last_cfi !== undefined) { updates.push('last_cfi = ?'); values.push(last_cfi); }
@@ -761,6 +790,86 @@ app.put('/api/books/:id/progress', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Progress update error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/books/:id/highlights', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, book_id, format, locator, text_excerpt, color, created_at FROM book_highlights WHERE book_id = ? ORDER BY created_at DESC',
+      [id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/books/:id/highlights', async (req, res) => {
+  const { id } = req.params;
+  const { format, locator, text_excerpt, color } = req.body;
+
+  if (!['epub', 'pdf'].includes(format)) {
+    return res.status(400).json({ error: 'Invalid format' });
+  }
+  if (!locator || !String(locator).trim()) {
+    return res.status(400).json({ error: 'Locator is required' });
+  }
+  if (!text_excerpt || !String(text_excerpt).trim()) {
+    return res.status(400).json({ error: 'Text excerpt is required' });
+  }
+
+  try {
+    const normalizedText = String(text_excerpt).trim();
+    const normalizedLocator = String(locator).trim();
+    const normalizedColor = typeof color === 'string' && color.trim() ? color.trim() : '#fde047';
+
+    const [duplicate] = await pool.query(
+      `SELECT id FROM book_highlights
+       WHERE book_id = ?
+         AND format = ?
+         AND (
+           locator = ?
+           OR LOWER(text_excerpt) = LOWER(?)
+         )
+       LIMIT 1`,
+      [id, format, normalizedLocator, normalizedText]
+    );
+    if (duplicate.length > 0) {
+      return res.status(409).json({ error: 'Highlight already exists' });
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO book_highlights (book_id, format, locator, text_excerpt, color) VALUES (?, ?, ?, ?, ?)',
+      [id, format, normalizedLocator, normalizedText, normalizedColor]
+    );
+    const [createdRows] = await pool.query(
+      'SELECT id, book_id, format, locator, text_excerpt, color, created_at FROM book_highlights WHERE id = ? LIMIT 1',
+      [result.insertId]
+    );
+    res.status(201).json(createdRows[0]);
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Highlight already exists' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/books/:id/highlights/:highlightId', async (req, res) => {
+  const { id, highlightId } = req.params;
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM book_highlights WHERE id = ? AND book_id = ?',
+      [highlightId, id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Highlight not found' });
+    }
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -903,8 +1012,17 @@ app.get('/api/manga/local/:mangaId/chapters', (req, res) => {
 
 app.get('/api/series', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM series ORDER BY title ASC');
-    res.json(rows);
+    const [rows] = await pool.query(`
+      SELECT s.*, 
+      (SELECT thumbnail_url FROM books b WHERE b.series_id = s.id ORDER BY b.created_at DESC LIMIT 1) as latest_book_thumbnail
+      FROM series s 
+      ORDER BY s.title ASC
+    `);
+    const results = rows.map(s => ({
+      ...s,
+      thumbnail_url: s.thumbnail_url || s.latest_book_thumbnail
+    }));
+    res.json(results);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -963,7 +1081,7 @@ app.get('/api/playlists', async (req, res) => {
         JOIN playlist_songs ps ON s.id = ps.song_id
         WHERE ps.playlist_id = ? AND s.thumbnail_url IS NOT NULL
         ORDER BY ps.song_id ASC
-        LIMIT 3
+        LIMIT 4
       `, [p.id]);
       p.thumbnails = songs.map(s => s.thumbnail_url).filter(Boolean);
     }
