@@ -7,6 +7,10 @@ const Upload = () => {
   const [type, setType] = useState('book');
   const [status, setStatus] = useState('idle'); // idle, uploading, success, error
   const [progress, setProgress] = useState(0);
+  const [title, setTitle] = useState('');
+  const [author, setAuthor] = useState('');
+  const [volumeNumber, setVolumeNumber] = useState('');
+  const [genres, setGenres] = useState('');
 
   const handleUpload = async (e) => {
     e.preventDefault();
@@ -17,6 +21,10 @@ const Upload = () => {
     const fieldName = type === 'music' ? 'music' : 'book';
     formData.append(fieldName, file);
     formData.append('type', type);
+    if (title.trim()) formData.append('title', title.trim());
+    if (author.trim()) formData.append('author', author.trim());
+    if (volumeNumber.trim()) formData.append('volume_number', volumeNumber.trim());
+    if (genres.trim()) formData.append('genres', genres.trim());
 
     try {
       const endpoint = type === 'music' ? '/api/upload/music' : '/api/upload/book';
@@ -25,6 +33,10 @@ const Upload = () => {
       });
       setStatus('success');
       setFile(null);
+      setTitle('');
+      setAuthor('');
+      setVolumeNumber('');
+      setGenres('');
     } catch (err) { setStatus('error'); }
   };
 
@@ -52,6 +64,35 @@ const Upload = () => {
               </button>
             ))}
           </div>
+
+          {(type === 'book' || type === 'manga') && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="input"
+                placeholder="Title (optional)"
+              />
+              <input
+                value={author}
+                onChange={(e) => setAuthor(e.target.value)}
+                className="input"
+                placeholder="Author (optional)"
+              />
+              <input
+                value={volumeNumber}
+                onChange={(e) => setVolumeNumber(e.target.value)}
+                className="input"
+                placeholder="Volume Number (optional)"
+              />
+              <input
+                value={genres}
+                onChange={(e) => setGenres(e.target.value)}
+                className="input"
+                placeholder="Genres as tags (comma separated)"
+              />
+            </div>
+          )}
 
           <label className="block group cursor-pointer">
             <div className={`aspect-video rounded-[1.5rem] border-2 border-dashed transition-all flex flex-col items-center justify-center gap-6 ${status === 'uploading' ? 'border-primary/50 bg-primary/5' : 'border-white/15 hover:border-primary/40 hover:bg-white/[0.02]'}`}>

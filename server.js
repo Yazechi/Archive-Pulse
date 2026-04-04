@@ -125,6 +125,145 @@ const initDb = async () => {
         FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE
       )
     `);
+
+    // === BATCH 1 FEATURE TABLES ===
+
+    // Tags System
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS tags (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE,
+        color VARCHAR(24) DEFAULT '#00f2ff',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS content_tags (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        tag_id INT NOT NULL,
+        content_type ENUM('song', 'book', 'video') NOT NULL,
+        content_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_content_tag (tag_id, content_type, content_id),
+        FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Activity Log / Watch History
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS activity_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        action_type ENUM('play', 'pause', 'complete', 'read', 'download', 'upload', 'add_to_library', 'remove', 'favorite', 'unfavorite') NOT NULL,
+        content_type ENUM('song', 'book', 'video', 'playlist', 'series') NOT NULL,
+        content_id INT NOT NULL,
+        content_title VARCHAR(500),
+        content_thumbnail VARCHAR(500),
+        metadata JSON,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_activity_type (action_type),
+        INDEX idx_activity_content (content_type, content_id),
+        INDEX idx_activity_time (created_at DESC)
+      )
+    `);
+
+    // Videos / Movies / Anime
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS videos (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        title TEXT NOT NULL,
+        original_title TEXT,
+        type ENUM('movie', 'anime', 'series', 'other') DEFAULT 'movie',
+        source ENUM('local', 'external') DEFAULT 'external',
+        source_id VARCHAR(255),
+        source_provider VARCHAR(100),
+        thumbnail_url TEXT,
+        backdrop_url TEXT,
+        description TEXT,
+        release_year INT,
+        duration INT,
+        rating FLOAT,
+        genres TEXT,
+        progress FLOAT DEFAULT 0,
+        last_position FLOAT DEFAULT 0,
+        last_watched_at TIMESTAMP NULL,
+        total_episodes INT DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_video_source (source, source_id)
+      )
+    `);
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS video_episodes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        video_id INT NOT NULL,
+        episode_number INT NOT NULL,
+        season_number INT DEFAULT 1,
+        title VARCHAR(500),
+        source_id VARCHAR(255),
+        source_url TEXT,
+        thumbnail_url TEXT,
+        duration INT,
+        progress FLOAT DEFAULT 0,
+        last_position FLOAT DEFAULT 0,
+        watched BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_episode (video_id, season_number, episode_number),
+        FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Favorites System
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS favorites (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        content_type ENUM('song', 'book', 'video') NOT NULL,
+        content_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_favorite (content_type, content_id)
+      )
+    `);
+
+    // Reading Sessions (for statistics)
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS reading_sessions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        book_id INT NOT NULL,
+        start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMP NULL,
+        pages_read INT DEFAULT 0,
+        start_page INT,
+        end_page INT,
+        duration_seconds INT DEFAULT 0,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Download Queue
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS downloads (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        content_type ENUM('manga_chapter', 'video', 'music') NOT NULL,
+        content_id VARCHAR(255) NOT NULL,
+        title VARCHAR(500) NOT NULL,
+        parent_title VARCHAR(500),
+        parent_id VARCHAR(255),
+        thumbnail_url TEXT,
+        status ENUM('pending', 'downloading', 'completed', 'failed', 'cancelled') DEFAULT 'pending',
+        progress FLOAT DEFAULT 0,
+        downloaded_bytes BIGINT DEFAULT 0,
+        total_bytes BIGINT DEFAULT 0,
+        error_message TEXT,
+        metadata JSON,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TIMESTAMP NULL,
+        completed_at TIMESTAMP NULL,
+        UNIQUE KEY unique_download (content_type, content_id)
+      )
+    `);
+
+    // Enhanced book_highlights with notes
+    try { await conn.query('ALTER TABLE book_highlights ADD COLUMN note TEXT AFTER color'); } catch (e) {}
     
     // Migrations
     try { await conn.query('ALTER TABLE books ADD COLUMN last_cfi VARCHAR(255)'); } catch (e) {}
@@ -132,6 +271,7 @@ const initDb = async () => {
     try { await conn.query('ALTER TABLE books ADD COLUMN last_read_at TIMESTAMP NULL'); } catch (e) {}
     try { await conn.query('ALTER TABLE books ADD COLUMN series_id INT NULL'); } catch (e) {}
     try { await conn.query('ALTER TABLE books ADD COLUMN volume_number FLOAT NULL'); } catch (e) {}
+    try { await conn.query('ALTER TABLE books ADD COLUMN last_chapter_title VARCHAR(255)'); } catch (e) {}
 
     const [columns] = await conn.query('SHOW COLUMNS FROM books');
     console.log('Books Table Columns:', columns.map(c => c.Field).join(', '));
@@ -312,6 +452,24 @@ const extractCbzCover = async (cbzPath, filename) => {
   }
 };
 
+const extractCbzPagesAsDataUrls = (cbzPath) => {
+  const zip = new AdmZip(cbzPath);
+  const entries = zip
+    .getEntries()
+    .filter((e) => !e.isDirectory && /\.(jpg|jpeg|png|webp)$/i.test(e.entryName))
+    .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true, sensitivity: 'base' }));
+
+  return entries.map((entry) => {
+    const ext = path.extname(entry.entryName).toLowerCase();
+    const mime =
+      ext === '.png' ? 'image/png'
+      : ext === '.webp' ? 'image/webp'
+      : 'image/jpeg';
+    const base64 = entry.getData().toString('base64');
+    return `data:${mime};base64,${base64}`;
+  });
+};
+
 const https = require('https');
 const axiosInstance = axios.create({
   httpsAgent: new https.Agent({  
@@ -356,6 +514,184 @@ const searchMangaDex = async (query) => {
     console.error('MangaDex search error:', err.message);
     return []; 
   }
+};
+
+const parseAnitakuSearchResults = (html, sourceProvider = 'Gogoanime') => {
+  const seen = new Set();
+  const results = [];
+  const itemRegex = /<li>[\s\S]*?<a[^>]+href="\/category\/([^"]+)"[^>]+title="([^"]+)"[\s\S]*?<img[^>]+src="([^"]+)"/gi;
+  let match;
+  while ((match = itemRegex.exec(html)) !== null) {
+    const slug = (match[1] || '').trim();
+    const title = (match[2] || '').trim();
+    const image = (match[3] || '').trim();
+    if (!slug || !title || seen.has(slug)) continue;
+    seen.add(slug);
+    results.push({
+      id: `${sourceProvider.toLowerCase()}-${slug}`,
+      title,
+      type: 'anime',
+      source: 'external',
+      source_id: slug,
+      source_provider: sourceProvider,
+      thumbnail_url: image.startsWith('//') ? `https:${image}` : image,
+      total_episodes: null
+    });
+  }
+  return results;
+};
+
+const searchAnitaku = async (query, sourceProvider = 'Gogoanime') => {
+  try {
+    const url = `https://anitaku.to/search.html?keyword=${encodeURIComponent(query)}`;
+    const res = await axiosInstance.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    return parseAnitakuSearchResults(res.data, sourceProvider);
+  } catch (err) {
+    console.error(`Anitaku search error (${sourceProvider}):`, err.message);
+    return [];
+  }
+};
+
+const getGogoEpisodeList = async (animeSlug) => {
+  const res = await axiosInstance.get(`https://anitaku.to/category/${encodeURIComponent(animeSlug)}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  });
+  const html = res.data;
+  const episodeListMatches = [...html.matchAll(/<ul id="episode_related"[\s\S]*?<\/ul>/gi)];
+  const scope = episodeListMatches.length > 0
+    ? episodeListMatches.map((m) => m[0]).join('\n')
+    : html;
+  const expectedPrefix = `${animeSlug.toLowerCase()}-episode-`;
+  const episodes = [];
+  const seen = new Set();
+  const epRegex = /href="\/([^"\s]*-episode-[^"]+)"[^>]*data-num="([0-9]+(?:\.[0-9]+)?)"/gi;
+  let match;
+  while ((match = epRegex.exec(scope)) !== null) {
+    const slug = (match[1] || '').trim();
+    const numRaw = (match[2] || '').trim();
+    if (!slug.toLowerCase().startsWith(expectedPrefix)) continue;
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const number = Number(numRaw);
+    episodes.push({
+      id: slug,
+      number: Number.isFinite(number) ? number : null,
+      title: number ? `Episode ${number}` : slug.replace(/-/g, ' ')
+    });
+  }
+  if (episodes.length === 0) {
+    const looseRegex = /href="\/([^"\s]*-episode-([0-9]+(?:\.[0-9]+)?))"/gi;
+    while ((match = looseRegex.exec(scope)) !== null) {
+      const slug = (match[1] || '').trim();
+      const numRaw = (match[2] || '').trim();
+      if (!slug.toLowerCase().startsWith(expectedPrefix)) continue;
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      const number = Number(numRaw);
+      episodes.push({
+        id: slug,
+        number: Number.isFinite(number) ? number : null,
+        title: number ? `Episode ${number}` : slug.replace(/-/g, ' ')
+      });
+    }
+  }
+  episodes.sort((a, b) => {
+    if (a.number == null && b.number == null) return a.id.localeCompare(b.id);
+    if (a.number == null) return 1;
+    if (b.number == null) return -1;
+    return a.number - b.number;
+  });
+  return episodes;
+};
+
+const getGogoWatchSources = async (episodeSlug) => {
+  try {
+    const res = await axiosInstance.get(`https://anitaku.to/${episodeSlug}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+    });
+    const html = res.data;
+    const seen = new Set();
+    const sources = [];
+    
+    // Try multiple patterns for video sources
+    const patterns = [
+      /data-video="([^"]+)"/gi,
+      /data-src="([^"]+)"/gi,
+      /src="(https?:\/\/[^"]*(?:embed|stream|play)[^"]*)"/gi,
+      /iframe[^>]*src="([^"]+)"/gi
+    ];
+    
+    for (const regex of patterns) {
+      let match;
+      while ((match = regex.exec(html)) !== null) {
+        let url = (match[1] || '').trim();
+        if (!url) continue;
+        // Ensure URL starts with protocol
+        if (url.startsWith('//')) url = 'https:' + url;
+        if (!url.startsWith('http')) continue;
+        if (seen.has(url)) continue;
+        seen.add(url);
+        sources.push({ url, quality: 'auto' });
+      }
+    }
+    return sources;
+  } catch (err) {
+    console.error('Watch sources error:', err.message);
+    return [];
+  }
+};
+
+const parseVidSrcSourceId = (value) => {
+  const sourceId = String(value || '').trim();
+  if (!sourceId) return {};
+  if (sourceId.startsWith('imdb:')) return { imdb: sourceId.slice(5) };
+  if (sourceId.startsWith('tmdb:')) return { tmdb: sourceId.slice(5) };
+  if (/^tt\d+$/i.test(sourceId)) return { imdb: sourceId };
+  if (/^\d+$/.test(sourceId)) return { tmdb: sourceId };
+  return {};
+};
+
+const searchVidSrcMovies = async (query, pages = 4) => {
+  const normalized = String(query || '').trim().toLowerCase();
+  if (!normalized) return [];
+
+  const aggregated = [];
+  for (let page = 1; page <= pages; page += 1) {
+    try {
+      const res = await axiosInstance.get(`https://vidsrc-embed.ru/movies/latest/page-${page}.json`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      const list = Array.isArray(res.data?.result) ? res.data.result : [];
+      aggregated.push(...list);
+    } catch (err) {
+      console.error(`VidSrc list page ${page} error:`, err.message);
+    }
+  }
+
+  return aggregated
+    .filter((item) => String(item.title || '').toLowerCase().includes(normalized))
+    .slice(0, 40)
+    .map((item) => {
+      const imdb = item.imdb_id || null;
+      const tmdb = item.tmdb_id || null;
+      const source_id = imdb ? `imdb:${imdb}` : (tmdb ? `tmdb:${tmdb}` : null);
+      return {
+        id: `vidsrc-${imdb || tmdb || Buffer.from(item.title || '').toString('hex').slice(0, 10)}`,
+        title: item.title,
+        type: 'movie',
+        source: 'external',
+        source_id,
+        source_provider: 'VidSrc',
+        thumbnail_url: null,
+        imdb_id: imdb,
+        tmdb_id: tmdb,
+        quality: item.quality,
+        time_added: item.time_added
+      };
+    })
+    .filter((v) => Boolean(v.source_id));
 };
 
 const searchJikan = async (query, type = 'manga') => {
@@ -632,6 +968,18 @@ app.get('/api/songs/smart/recently-played', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/songs/smart/favorites', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT s.* FROM songs s
+      JOIN favorites f ON f.content_id = s.id
+      WHERE f.content_type = 'song'
+      ORDER BY f.created_at DESC
+    `);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- ROUTES: BOOKS ---
 
 app.get('/api/books', async (req, res) => {
@@ -689,7 +1037,7 @@ app.post('/api/books/add', async (req, res) => {
 
 app.post('/api/upload/book', upload.single('book'), async (req, res) => {
   try {
-    const { title, author, type, series_id, volume_number } = req.body;
+    const { title, author, type, series_id, volume_number, genres } = req.body;
     const filename = req.file.filename;
     const filePath = req.file.path;
     let thumbnail_url = null;
@@ -700,7 +1048,7 @@ app.post('/api/upload/book', upload.single('book'), async (req, res) => {
       thumbnail_url = await extractCbzCover(filePath, filename);
     }
 
-    await pool.query(
+    const [insertResult] = await pool.query(
       'INSERT INTO books (title, author, type, source, source_url, thumbnail_url, series_id, volume_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [
         title || req.file.originalname, 
@@ -713,28 +1061,46 @@ app.post('/api/upload/book', upload.single('book'), async (req, res) => {
         volume_number ? parseFloat(volume_number) : null
       ]
     );
+
+    const bookId = insertResult.insertId;
+    const parsedGenres = String(genres || '')
+      .split(',')
+      .map((g) => g.trim())
+      .filter(Boolean);
+
+    for (const genreName of parsedGenres) {
+      let [tagRows] = await pool.query('SELECT id FROM tags WHERE name = ? LIMIT 1', [genreName]);
+      let tagId = tagRows[0]?.id;
+      if (!tagId) {
+        const [tagResult] = await pool.query('INSERT INTO tags (name, color) VALUES (?, ?)', [genreName, '#00f2ff']);
+        tagId = tagResult.insertId;
+      }
+      await pool.query(
+        'INSERT INTO content_tags (tag_id, content_type, content_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE tag_id=tag_id',
+        [tagId, 'book', bookId]
+      );
+    }
+
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/books/search', async (req, res) => {
-  const { q, type } = req.query;
+  const { q, type, provider = 'all' } = req.query;
   try {
     if (type === 'manga') {
-      const mdResults = await searchMangaDex(q || 'popular');
-      return res.json(mdResults);
+      const providers = [];
+      if (provider === 'all' || provider === 'mangadex') providers.push(searchMangaDex(q || 'popular'));
+      if (provider === 'all' || provider === 'myanimelist') providers.push(searchJikan(q || 'popular', 'manga'));
+      const results = await Promise.all(providers);
+      return res.json(results.flat());
     }
-    const gtResults = await searchFreeNovels(q);
-    const olResults = await searchOpenLibrary(q);
-    
-    // Merge and interleave results for better variety
-    const merged = [];
-    const maxLength = Math.max(gtResults.length, olResults.length);
-    for (let i = 0; i < maxLength; i++) {
-      if (i < gtResults.length) merged.push(gtResults[i]);
-      if (i < olResults.length) merged.push(olResults[i]);
-    }
-    res.json(merged);
+    const providers = [];
+    if (provider === 'all' || provider === 'gutenberg') providers.push(searchFreeNovels(q));
+    if (provider === 'all' || provider === 'openlibrary') providers.push(searchOpenLibrary(q));
+    const results = await Promise.all(providers);
+    const flattened = results.flat();
+    res.json(flattened);
   } catch (err) { res.status(500).json({ error: 'Search failed' }); }
 });
 
@@ -767,7 +1133,7 @@ app.delete('/api/books/:id', async (req, res) => {
 
 app.put('/api/books/:id/progress', async (req, res) => {
   const { id } = req.params;
-  const { progress, last_page, total_pages, last_cfi } = req.body;
+  const { progress, last_page, total_pages, last_cfi, last_chapter_title } = req.body;
   
   try {
     const updates = [];
@@ -780,6 +1146,7 @@ app.put('/api/books/:id/progress', async (req, res) => {
     if (last_page !== undefined) { updates.push('last_page = ?'); values.push(last_page); }
     if (total_pages !== undefined) { updates.push('total_pages = ?'); values.push(total_pages); }
     if (last_cfi !== undefined) { updates.push('last_cfi = ?'); values.push(last_cfi); }
+    if (last_chapter_title !== undefined) { updates.push('last_chapter_title = ?'); values.push(last_chapter_title); }
     
     updates.push('last_read_at = CURRENT_TIMESTAMP');
     
@@ -794,11 +1161,52 @@ app.put('/api/books/:id/progress', async (req, res) => {
   }
 });
 
+app.put('/api/books/:id/metadata', async (req, res) => {
+  const { id } = req.params;
+  const { title, author, volume_number, genres } = req.body;
+  try {
+    const updates = [];
+    const values = [];
+    if (title !== undefined) { updates.push('title = ?'); values.push(title); }
+    if (author !== undefined) { updates.push('author = ?'); values.push(author); }
+    if (volume_number !== undefined) { updates.push('volume_number = ?'); values.push(volume_number || null); }
+    if (updates.length > 0) {
+      values.push(id);
+      await pool.query(`UPDATE books SET ${updates.join(', ')} WHERE id = ?`, values);
+    }
+
+    if (genres !== undefined) {
+      await pool.query(
+        "DELETE ct FROM content_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.content_type = 'book' AND ct.content_id = ? AND t.color = '#00f2ff'",
+        [id]
+      );
+      const parsedGenres = String(genres || '')
+        .split(',')
+        .map((g) => g.trim())
+        .filter(Boolean);
+      for (const genreName of parsedGenres) {
+        let [tagRows] = await pool.query('SELECT id FROM tags WHERE name = ? LIMIT 1', [genreName]);
+        let tagId = tagRows[0]?.id;
+        if (!tagId) {
+          const [tagResult] = await pool.query('INSERT INTO tags (name, color) VALUES (?, ?)', [genreName, '#00f2ff']);
+          tagId = tagResult.insertId;
+        }
+        await pool.query(
+          'INSERT INTO content_tags (tag_id, content_type, content_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE tag_id=tag_id',
+          [tagId, 'book', id]
+        );
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/books/:id/highlights', async (req, res) => {
   const { id } = req.params;
   try {
     const [rows] = await pool.query(
-      'SELECT id, book_id, format, locator, text_excerpt, color, created_at FROM book_highlights WHERE book_id = ? ORDER BY created_at DESC',
+      'SELECT id, book_id, format, locator, text_excerpt, color, note, created_at FROM book_highlights WHERE book_id = ? ORDER BY created_at DESC',
       [id]
     );
     res.json(rows);
@@ -809,7 +1217,7 @@ app.get('/api/books/:id/highlights', async (req, res) => {
 
 app.post('/api/books/:id/highlights', async (req, res) => {
   const { id } = req.params;
-  const { format, locator, text_excerpt, color } = req.body;
+  const { format, locator, text_excerpt, color, note } = req.body;
 
   if (!['epub', 'pdf'].includes(format)) {
     return res.status(400).json({ error: 'Invalid format' });
@@ -825,6 +1233,7 @@ app.post('/api/books/:id/highlights', async (req, res) => {
     const normalizedText = String(text_excerpt).trim();
     const normalizedLocator = String(locator).trim();
     const normalizedColor = typeof color === 'string' && color.trim() ? color.trim() : '#fde047';
+    const normalizedNote = note ? String(note).trim() : null;
 
     const [duplicate] = await pool.query(
       `SELECT id FROM book_highlights
@@ -842,11 +1251,11 @@ app.post('/api/books/:id/highlights', async (req, res) => {
     }
 
     const [result] = await pool.query(
-      'INSERT INTO book_highlights (book_id, format, locator, text_excerpt, color) VALUES (?, ?, ?, ?, ?)',
-      [id, format, normalizedLocator, normalizedText, normalizedColor]
+      'INSERT INTO book_highlights (book_id, format, locator, text_excerpt, color, note) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, format, normalizedLocator, normalizedText, normalizedColor, normalizedNote]
     );
     const [createdRows] = await pool.query(
-      'SELECT id, book_id, format, locator, text_excerpt, color, created_at FROM book_highlights WHERE id = ? LIMIT 1',
+      'SELECT id, book_id, format, locator, text_excerpt, color, note, created_at FROM book_highlights WHERE id = ? LIMIT 1',
       [result.insertId]
     );
     res.status(201).json(createdRows[0]);
@@ -1006,6 +1415,20 @@ app.get('/api/manga/local/:mangaId/chapters', (req, res) => {
     return numA - numB;
   });
   res.json(chapters);
+});
+
+app.get('/api/manga/local/:mangaId/chapter/:chapterFile/pages', (req, res) => {
+  const { mangaId, chapterFile } = req.params;
+  const chapterPath = path.join(mangaUploadDir, mangaId, chapterFile);
+  if (!fs.existsSync(chapterPath) || !chapterPath.toLowerCase().endsWith('.cbz')) {
+    return res.status(404).json({ error: 'Chapter file not found' });
+  }
+  try {
+    const pages = extractCbzPagesAsDataUrls(chapterPath);
+    res.json(pages);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to decode chapter pages', details: err.message });
+  }
 });
 
 // --- ROUTES: SERIES ---
@@ -1229,5 +1652,1116 @@ app.get('/api/stream/:id', (req, res) => {
 
   startStream();
 });
+
+// ============================================
+// BATCH 1 FEATURES - NEW API ENDPOINTS
+// ============================================
+
+// --- ROUTES: TAGS SYSTEM ---
+
+app.get('/api/tags', async (req, res) => {
+
+  try {
+    const [rows] = await pool.query('SELECT * FROM tags ORDER BY name ASC');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/tags', async (req, res) => {
+  const { name, color } = req.body;
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: 'Tag name is required' });
+  }
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO tags (name, color) VALUES (?, ?)',
+      [name.trim(), color || '#00f2ff']
+    );
+    res.status(201).json({ id: result.insertId, name: name.trim(), color: color || '#00f2ff' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Tag already exists' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/tags/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, color } = req.body;
+  try {
+    await pool.query('UPDATE tags SET name = ?, color = ? WHERE id = ?', [name, color, id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/tags/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM tags WHERE id = ?', [id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Content Tags
+app.get('/api/tags/content/:contentType/:contentId', async (req, res) => {
+  const { contentType, contentId } = req.params;
+  try {
+    const [rows] = await pool.query(`
+      SELECT t.* FROM tags t
+      JOIN content_tags ct ON t.id = ct.tag_id
+      WHERE ct.content_type = ? AND ct.content_id = ?
+    `, [contentType, contentId]);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/tags/content', async (req, res) => {
+  const { tag_id, content_type, content_id } = req.body;
+  try {
+    await pool.query(
+      'INSERT INTO content_tags (tag_id, content_type, content_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE tag_id=tag_id',
+      [tag_id, content_type, content_id]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/tags/content/:contentType/:contentId/:tagId', async (req, res) => {
+  const { contentType, contentId, tagId } = req.params;
+  try {
+    await pool.query(
+      'DELETE FROM content_tags WHERE tag_id = ? AND content_type = ? AND content_id = ?',
+      [tagId, contentType, contentId]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Filter content by tags
+app.get('/api/tags/:tagId/content', async (req, res) => {
+  const { tagId } = req.params;
+  const { type } = req.query; // optional filter by content type
+  try {
+    let query = `
+      SELECT ct.content_type, ct.content_id, ct.created_at,
+        CASE 
+          WHEN ct.content_type = 'song' THEN (SELECT title FROM songs WHERE id = ct.content_id)
+          WHEN ct.content_type = 'book' THEN (SELECT title FROM books WHERE id = ct.content_id)
+          WHEN ct.content_type = 'video' THEN (SELECT title FROM videos WHERE id = ct.content_id)
+        END as title,
+        CASE 
+          WHEN ct.content_type = 'song' THEN (SELECT thumbnail_url FROM songs WHERE id = ct.content_id)
+          WHEN ct.content_type = 'book' THEN (SELECT thumbnail_url FROM books WHERE id = ct.content_id)
+          WHEN ct.content_type = 'video' THEN (SELECT thumbnail_url FROM videos WHERE id = ct.content_id)
+        END as thumbnail_url
+      FROM content_tags ct
+      WHERE ct.tag_id = ?
+    `;
+    const params = [tagId];
+    if (type) {
+      query += ' AND ct.content_type = ?';
+      params.push(type);
+    }
+    query += ' ORDER BY ct.created_at DESC';
+    
+    const [rows] = await pool.query(query, params);
+    res.json(rows.filter(r => r.title !== null)); // Filter out deleted content
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROUTES: ACTIVITY LOG / WATCH HISTORY ---
+
+app.get('/api/activity', async (req, res) => {
+  const { limit = 50, offset = 0, type, content_type } = req.query;
+  try {
+    let query = 'SELECT * FROM activity_log WHERE 1=1';
+    const params = [];
+    
+    if (type) {
+      query += ' AND action_type = ?';
+      params.push(type);
+    }
+    if (content_type) {
+      query += ' AND content_type = ?';
+      params.push(content_type);
+    }
+    
+    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+    
+    const [rows] = await pool.query(query, params);
+    const [countResult] = await pool.query('SELECT COUNT(*) as total FROM activity_log');
+    
+    res.json({ 
+      activities: rows, 
+      total: countResult[0].total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/activity', async (req, res) => {
+  const { action_type, content_type, content_id, content_title, content_thumbnail, metadata } = req.body;
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO activity_log (action_type, content_type, content_id, content_title, content_thumbnail, metadata) VALUES (?, ?, ?, ?, ?, ?)',
+      [action_type, content_type, content_id, content_title, content_thumbnail, metadata ? JSON.stringify(metadata) : null]
+    );
+    res.status(201).json({ id: result.insertId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/activity/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM activity_log WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/activity', async (req, res) => {
+  // Clear all activity (with optional filters)
+  const { content_type, before_date } = req.query;
+  try {
+    let query = 'DELETE FROM activity_log WHERE 1=1';
+    const params = [];
+    if (content_type) {
+      query += ' AND content_type = ?';
+      params.push(content_type);
+    }
+    if (before_date) {
+      query += ' AND created_at < ?';
+      params.push(before_date);
+    }
+    await pool.query(query, params);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Activity Statistics
+app.get('/api/activity/stats', async (req, res) => {
+  const { days = 30 } = req.query;
+  try {
+    // Get activity by day
+    const [dailyActivity] = await pool.query(`
+      SELECT DATE(created_at) as date, content_type, COUNT(*) as count
+      FROM activity_log
+      WHERE created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      GROUP BY DATE(created_at), content_type
+      ORDER BY date DESC
+    `, [parseInt(days)]);
+
+    // Get most played/read content
+    const [topSongs] = await pool.query(`
+      SELECT content_id, content_title, content_thumbnail, COUNT(*) as play_count
+      FROM activity_log
+      WHERE content_type = 'song' AND action_type = 'play'
+      GROUP BY content_id, content_title, content_thumbnail
+      ORDER BY play_count DESC
+      LIMIT 10
+    `);
+
+    const [topBooks] = await pool.query(`
+      SELECT content_id, content_title, content_thumbnail, COUNT(*) as read_count
+      FROM activity_log
+      WHERE content_type = 'book' AND action_type = 'read'
+      GROUP BY content_id, content_title, content_thumbnail
+      ORDER BY read_count DESC
+      LIMIT 10
+    `);
+
+    res.json({ dailyActivity, topSongs, topBooks });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROUTES: VIDEOS / MOVIES / ANIME ---
+
+app.get('/api/videos', async (req, res) => {
+  const { type, sort = 'created_at', order = 'DESC' } = req.query;
+  try {
+    let query = 'SELECT * FROM videos';
+    const params = [];
+    if (type) {
+      query += ' WHERE type = ?';
+      params.push(type);
+    }
+    const validSorts = ['created_at', 'title', 'rating', 'release_year', 'last_watched_at'];
+    const sortField = validSorts.includes(sort) ? sort : 'created_at';
+    const sortOrder = order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    query += ` ORDER BY ${sortField} ${sortOrder}`;
+    
+    const [rows] = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/videos', async (req, res) => {
+  const { 
+    title, original_title, type, source, source_id, source_provider,
+    thumbnail_url, backdrop_url, description, release_year, duration,
+    rating, genres, total_episodes 
+  } = req.body;
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO videos (title, original_title, type, source, source_id, source_provider,
+        thumbnail_url, backdrop_url, description, release_year, duration, rating, genres, total_episodes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE title=VALUES(title), thumbnail_url=VALUES(thumbnail_url)`,
+      [title, original_title, type || 'movie', source || 'external', source_id, source_provider,
+       thumbnail_url, backdrop_url, description, release_year, duration, rating, genres, total_episodes || 1]
+    );
+    res.status(201).json({ id: result.insertId || result.affectedRows, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/videos/:id/progress', async (req, res) => {
+  const { progress, last_position } = req.body;
+  try {
+    await pool.query(
+      'UPDATE videos SET progress = ?, last_position = ?, last_watched_at = NOW() WHERE id = ?',
+      [progress, last_position, req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/videos/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM videos WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Video Episodes
+app.post('/api/videos/:id/episodes', async (req, res) => {
+  const { episodes } = req.body; // Array of episode objects
+  try {
+    for (const ep of episodes) {
+      await pool.query(
+        `INSERT INTO video_episodes (video_id, episode_number, season_number, title, source_id, source_url, thumbnail_url, duration)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE title=VALUES(title), source_url=VALUES(source_url)`,
+        [req.params.id, ep.episode_number, ep.season_number || 1, ep.title, ep.source_id, ep.source_url, ep.thumbnail_url, ep.duration]
+      );
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/videos/:videoId/episodes/:episodeId/progress', async (req, res) => {
+  const { progress, last_position, watched } = req.body;
+  try {
+    await pool.query(
+      'UPDATE video_episodes SET progress = ?, last_position = ?, watched = ? WHERE id = ?',
+      [progress, last_position, watched || false, req.params.episodeId]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Update watch progress for a video (last episode watched)
+app.put('/api/videos/:id/watch-progress', async (req, res) => {
+  const { id } = req.params;
+  const { last_episode_number, last_episode_id, last_episode_title, last_position } = req.body;
+  try {
+    const updates = [];
+    const values = [];
+    if (last_episode_number !== undefined) {
+      updates.push('progress = ?');
+      values.push(last_episode_number);
+    }
+    if (last_position !== undefined) {
+      updates.push('last_position = ?');
+      values.push(last_position);
+    }
+    updates.push('last_watched_at = CURRENT_TIMESTAMP');
+    
+    if (updates.length > 0) {
+      values.push(id);
+      await pool.query(`UPDATE videos SET ${updates.join(', ')} WHERE id = ?`, values);
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get video progress (per-episode tracking)
+app.get('/api/videos/:id/progress', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Handle case where video might not be in library yet
+    if (!id || id === 'undefined' || id === 'null') {
+      return res.json({});
+    }
+    const [rows] = await pool.query(
+      'SELECT episode_number, progress, last_position, watched FROM video_episodes WHERE video_id = ?',
+      [id]
+    );
+    const progressMap = {};
+    rows.forEach(r => {
+      progressMap[r.episode_number] = {
+        progress: r.progress || 0,
+        position: r.last_position || 0,
+        watched: r.watched || false
+      };
+    });
+    res.json(progressMap);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Video Search - Multiple Providers
+app.get('/api/videos/search', async (req, res) => {
+  const { q, type = 'movie', provider = 'all' } = req.query;
+  if (!q) return res.status(400).json({ error: 'Query required' });
+  
+  try {
+    const results = [];
+    
+    if (type === 'anime') {
+      // Primary anime provider: Gogoanime/Anitaku
+      if (provider === 'all' || provider === 'gogoanime') {
+        try {
+          const gogoResults = await searchAnitaku(q, 'Gogoanime');
+          results.push(...gogoResults);
+        } catch (e) { console.error('Gogoanime search error:', e.message); }
+      }
+
+      // Alternate anime provider mapped to same upstream (Aniwatch-style selection)
+      if (provider === 'all' || provider === 'aniwatch') {
+        try {
+          const aniwatchResults = await searchAnitaku(q, 'Aniwatch');
+          results.push(...aniwatchResults);
+        } catch (e) { console.error('Aniwatch search error:', e.message); }
+      }
+
+      // Optional metadata-only source
+      if (provider === 'all' || provider === 'myanimelist') {
+        try {
+          const jikanRes = await axios.get(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(q)}&limit=20`);
+          const animeResults = (jikanRes.data.data || []).map(a => ({
+            id: `jikan-${a.mal_id}`,
+            title: a.title,
+            original_title: a.title_japanese,
+            type: 'anime',
+            source: 'external',
+            source_id: a.mal_id.toString(),
+            source_provider: 'MyAnimeList',
+            thumbnail_url: a.images.jpg.large_image_url || a.images.jpg.image_url,
+            description: a.synopsis,
+            release_year: a.year || (a.aired?.from ? new Date(a.aired.from).getFullYear() : null),
+            rating: a.score,
+            genres: a.genres?.map(g => g.name).join(', '),
+            total_episodes: a.episodes || 1,
+            duration: a.duration
+          }));
+          results.push(...animeResults);
+        } catch (e) { console.error('Jikan anime search error:', e.message); }
+      }
+    } else {
+      // Movies - Archive.org + embed-capable stream hints
+      if (provider === 'all' || provider === 'archive') {
+        try {
+          const archiveRes = await axios.get(`https://archive.org/advancedsearch.php?q=${encodeURIComponent(q)}+mediatype:movies&output=json&rows=20`);
+          const archiveResults = (archiveRes.data.response?.docs || []).map(m => ({
+            id: `archive-${m.identifier}`,
+            title: m.title,
+            type: 'movie',
+            source: 'external',
+            source_id: m.identifier,
+            source_provider: 'Archive.org',
+            thumbnail_url: `https://archive.org/services/img/${m.identifier}`,
+            description: m.description,
+            release_year: m.year ? parseInt(m.year) : null
+          }));
+          results.push(...archiveResults);
+        } catch (e) { console.error('Archive.org search error:', e.message); }
+      }
+
+      // Add generic movie embed source suggestions (query-based)
+      const qEnc = encodeURIComponent(q);
+      if (provider === 'all' || provider === 'embed2') {
+        results.push({
+          id: `embed2-${qEnc}`,
+          title: `${q} (Embed Source)`,
+          type: 'movie',
+          source: 'external',
+          source_id: qEnc,
+          source_provider: 'Embed.su',
+          thumbnail_url: null,
+          embed_url: `https://www.2embed.to/embed/imdb/movie?q=${qEnc}`
+        });
+      }
+      if (provider === 'all' || provider === 'vidsrc') {
+        const vidsrcResults = await searchVidSrcMovies(q);
+        results.push(...vidsrcResults);
+      }
+    }
+    
+    const providerMap = {
+      gogoanime: 'Gogoanime',
+      aniwatch: 'Aniwatch',
+      myanimelist: 'MyAnimeList',
+      archive: 'Archive.org',
+      embed2: 'Embed.su',
+      vidsrc: 'VidSrc',
+    };
+    const strictResults = provider === 'all'
+      ? results
+      : results.filter((item) => item.source_provider === providerMap[provider]);
+    res.json(strictResults);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/videos/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM videos WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Video not found' });
+    
+    // Get episodes if it's a series/anime
+    const [episodes] = await pool.query(
+      'SELECT * FROM video_episodes WHERE video_id = ? ORDER BY season_number, episode_number',
+      [req.params.id]
+    );
+    
+    res.json({ ...rows[0], episodes });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get streaming sources for anime episodes
+app.get('/api/videos/anime/:id/episodes', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const episodes = await getGogoEpisodeList(id);
+    res.json({ episodes });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/videos/anime/watch/:episodeId', async (req, res) => {
+  const { episodeId } = req.params;
+  try {
+    const sources = await getGogoWatchSources(episodeId);
+    res.json({ sources });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/videos/movie/watch', async (req, res) => {
+  const { source, id, q } = req.query;
+  const query = encodeURIComponent(q || '');
+  if (source === 'Archive.org' && id) {
+    return res.json({ url: `https://archive.org/details/${id}` });
+  }
+  if (source === 'Embed.su') {
+    return res.json({ url: `https://www.2embed.to/embed/imdb/movie?q=${query}` });
+  }
+  if (source === 'VidSrc') {
+    const { imdb, tmdb } = parseVidSrcSourceId(id);
+    if (imdb) return res.json({ url: `https://vidsrc-embed.su/embed/movie?imdb=${encodeURIComponent(imdb)}` });
+    if (tmdb) return res.json({ url: `https://vidsrc-embed.su/embed/movie?tmdb=${encodeURIComponent(tmdb)}` });
+    return res.json({ url: `https://vidsrc-embed.su/embed/movie?imdb=${query}` });
+  }
+  return res.status(400).json({ error: 'Unsupported movie source' });
+});
+
+// Local video upload
+const videoUploadDir = path.join(UPLOADS_DIR, 'videos');
+if (!fs.existsSync(videoUploadDir)) fs.mkdirSync(videoUploadDir, { recursive: true });
+
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, videoUploadDir),
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname))
+});
+const videoUpload = multer({ storage: videoStorage });
+
+app.post('/api/upload/video', videoUpload.single('video'), async (req, res) => {
+  try {
+    const { title, type } = req.body;
+    const filename = req.file.filename;
+    
+    const [result] = await pool.query(
+      'INSERT INTO videos (title, type, source, source_id) VALUES (?, ?, ?, ?)',
+      [title || req.file.originalname, type || 'movie', 'local', filename]
+    );
+    
+    res.json({ success: true, id: result.insertId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Stream local video
+app.get('/api/videos/stream/:filename', (req, res) => {
+  const { filename } = req.params;
+  const videoPath = path.join(videoUploadDir, filename);
+  
+  if (!fs.existsSync(videoPath)) {
+    return res.status(404).json({ error: 'Video not found' });
+  }
+  
+  const stat = fs.statSync(videoPath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunksize = (end - start) + 1;
+    const file = fs.createReadStream(videoPath, { start, end });
+    const head = {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunksize,
+      'Content-Type': 'video/mp4',
+    };
+    res.writeHead(206, head);
+    file.pipe(res);
+  } else {
+    const head = {
+      'Content-Length': fileSize,
+      'Content-Type': 'video/mp4',
+    };
+    res.writeHead(200, head);
+    fs.createReadStream(videoPath).pipe(res);
+  }
+});
+
+// --- ROUTES: FAVORITES ---
+
+app.get('/api/favorites', async (req, res) => {
+  const { type } = req.query;
+  try {
+    let query = `
+      SELECT f.*, 
+        CASE 
+          WHEN f.content_type = 'song' THEN (SELECT JSON_OBJECT('id', id, 'title', title, 'artist', artist, 'thumbnail_url', thumbnail_url, 'duration', duration) FROM songs WHERE id = f.content_id)
+          WHEN f.content_type = 'book' THEN (SELECT JSON_OBJECT('id', id, 'title', title, 'author', author, 'thumbnail_url', thumbnail_url, 'progress', progress, 'type', type) FROM books WHERE id = f.content_id)
+          WHEN f.content_type = 'video' THEN (SELECT JSON_OBJECT('id', id, 'title', title, 'thumbnail_url', thumbnail_url, 'type', type, 'progress', progress) FROM videos WHERE id = f.content_id)
+        END as content_data
+      FROM favorites f
+    `;
+    const params = [];
+    if (type) {
+      query += ' WHERE f.content_type = ?';
+      params.push(type);
+    }
+    query += ' ORDER BY f.created_at DESC';
+    
+    const [rows] = await pool.query(query, params);
+    // Parse JSON content_data
+    const results = rows.map(r => ({
+      ...r,
+      content_data: r.content_data ? JSON.parse(r.content_data) : null
+    })).filter(r => r.content_data !== null);
+    
+    res.json(results);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/favorites', async (req, res) => {
+  const { content_type, content_id } = req.body;
+  try {
+    await pool.query(
+      'INSERT INTO favorites (content_type, content_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at=NOW()',
+      [content_type, content_id]
+    );
+    res.status(201).json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/favorites/:contentType/:contentId', async (req, res) => {
+  const { contentType, contentId } = req.params;
+  try {
+    await pool.query('DELETE FROM favorites WHERE content_type = ? AND content_id = ?', [contentType, contentId]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/favorites/check/:contentType/:contentId', async (req, res) => {
+  const { contentType, contentId } = req.params;
+  try {
+    const [rows] = await pool.query(
+      'SELECT id FROM favorites WHERE content_type = ? AND content_id = ?',
+      [contentType, contentId]
+    );
+    res.json({ isFavorite: rows.length > 0 });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROUTES: READING SESSIONS & STATISTICS ---
+
+app.post('/api/reading-sessions/start', async (req, res) => {
+  const { book_id, start_page } = req.body;
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO reading_sessions (book_id, start_page) VALUES (?, ?)',
+      [book_id, start_page || 0]
+    );
+    res.status(201).json({ session_id: result.insertId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/reading-sessions/:id/end', async (req, res) => {
+  const { id } = req.params;
+  const { end_page, pages_read } = req.body;
+  try {
+    // Calculate duration
+    const [session] = await pool.query('SELECT start_time FROM reading_sessions WHERE id = ?', [id]);
+    if (session.length === 0) return res.status(404).json({ error: 'Session not found' });
+    
+    const startTime = new Date(session[0].start_time);
+    const endTime = new Date();
+    const durationSeconds = Math.floor((endTime - startTime) / 1000);
+    
+    await pool.query(
+      'UPDATE reading_sessions SET end_time = NOW(), end_page = ?, pages_read = ?, duration_seconds = ? WHERE id = ?',
+      [end_page, pages_read || 0, durationSeconds, id]
+    );
+    res.json({ success: true, duration_seconds: durationSeconds });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/reading-sessions/book/:bookId', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM reading_sessions WHERE book_id = ? ORDER BY start_time DESC',
+      [req.params.bookId]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Reading Statistics
+app.get('/api/stats/reading', async (req, res) => {
+  const { days = 30 } = req.query;
+  try {
+    // Total reading time
+    const [totalTime] = await pool.query(`
+      SELECT SUM(duration_seconds) as total_seconds, SUM(pages_read) as total_pages
+      FROM reading_sessions
+      WHERE start_time >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    `, [parseInt(days)]);
+    
+    // Reading by day
+    const [dailyReading] = await pool.query(`
+      SELECT DATE(start_time) as date, 
+             SUM(duration_seconds) as seconds,
+             SUM(pages_read) as pages,
+             COUNT(DISTINCT book_id) as books_read
+      FROM reading_sessions
+      WHERE start_time >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      GROUP BY DATE(start_time)
+      ORDER BY date DESC
+    `, [parseInt(days)]);
+    
+    // Books completed
+    const [booksCompleted] = await pool.query(`
+      SELECT COUNT(*) as count FROM books WHERE progress >= 100
+    `);
+    
+    // Current streak
+    const [streakData] = await pool.query(`
+      SELECT DISTINCT DATE(start_time) as date
+      FROM reading_sessions
+      WHERE start_time >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+      ORDER BY date DESC
+    `);
+    
+    let currentStreak = 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    for (let i = 0; i < streakData.length; i++) {
+      const sessionDate = new Date(streakData[i].date);
+      sessionDate.setHours(0, 0, 0, 0);
+      const expectedDate = new Date(today);
+      expectedDate.setDate(expectedDate.getDate() - i);
+      
+      if (sessionDate.getTime() === expectedDate.getTime()) {
+        currentStreak++;
+      } else if (i === 0 && sessionDate.getTime() === expectedDate.getTime() - 86400000) {
+        // Allow for "yesterday" to still count
+        currentStreak++;
+      } else {
+        break;
+      }
+    }
+    
+    // Average session length
+    const [avgSession] = await pool.query(`
+      SELECT AVG(duration_seconds) as avg_seconds, AVG(pages_read) as avg_pages
+      FROM reading_sessions
+      WHERE duration_seconds > 0
+    `);
+    
+    // Most read books
+    const [topBooks] = await pool.query(`
+      SELECT b.id, b.title, b.author, b.thumbnail_url, 
+             SUM(rs.duration_seconds) as total_time,
+             SUM(rs.pages_read) as total_pages
+      FROM reading_sessions rs
+      JOIN books b ON rs.book_id = b.id
+      GROUP BY b.id
+      ORDER BY total_time DESC
+      LIMIT 10
+    `);
+    
+    res.json({
+      totalSeconds: totalTime[0]?.total_seconds || 0,
+      totalPages: totalTime[0]?.total_pages || 0,
+      dailyReading,
+      booksCompleted: booksCompleted[0]?.count || 0,
+      currentStreak,
+      avgSessionSeconds: Math.round(avgSession[0]?.avg_seconds || 0),
+      avgPagesPerSession: Math.round(avgSession[0]?.avg_pages || 0),
+      topBooks
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ROUTES: ENHANCED HIGHLIGHTS (with notes) ---
+
+// Update the existing highlights endpoint to include notes
+app.put('/api/books/:bookId/highlights/:highlightId', async (req, res) => {
+  const { bookId, highlightId } = req.params;
+  const { color, note } = req.body;
+  try {
+    const updates = [];
+    const params = [];
+    
+    if (color !== undefined) {
+      updates.push('color = ?');
+      params.push(color);
+    }
+    if (note !== undefined) {
+      updates.push('note = ?');
+      params.push(note);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    params.push(highlightId, bookId);
+    await pool.query(
+      `UPDATE book_highlights SET ${updates.join(', ')} WHERE id = ? AND book_id = ?`,
+      params
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get all highlights with notes (annotations view)
+app.get('/api/annotations', async (req, res) => {
+  const { book_id } = req.query;
+  try {
+    let query = `
+      SELECT h.*, b.title as book_title, b.author as book_author, b.thumbnail_url as book_thumbnail
+      FROM book_highlights h
+      JOIN books b ON h.book_id = b.id
+    `;
+    const params = [];
+    if (book_id) {
+      query += ' WHERE h.book_id = ?';
+      params.push(book_id);
+    }
+    query += ' ORDER BY h.created_at DESC';
+    
+    const [rows] = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============== DOWNLOAD QUEUE ENDPOINTS ==============
+
+// In-memory download progress tracking (for real-time updates)
+const activeDownloads = new Map();
+
+// Get all downloads
+app.get('/api/downloads', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT * FROM downloads 
+      ORDER BY 
+        CASE status 
+          WHEN 'downloading' THEN 1 
+          WHEN 'pending' THEN 2 
+          WHEN 'failed' THEN 3
+          WHEN 'completed' THEN 4
+          WHEN 'cancelled' THEN 5
+        END,
+        created_at DESC
+    `);
+    // Merge with in-memory progress for active downloads
+    const enriched = rows.map(row => {
+      const active = activeDownloads.get(row.id);
+      if (active) {
+        return { ...row, ...active };
+      }
+      return row;
+    });
+    res.json(enriched);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get download progress (for polling)
+app.get('/api/downloads/:id/progress', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.query('SELECT * FROM downloads WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Download not found' });
+    
+    const active = activeDownloads.get(parseInt(id));
+    if (active) {
+      return res.json({ ...rows[0], ...active });
+    }
+    res.json(rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Queue a new download
+app.post('/api/downloads/queue', async (req, res) => {
+  const { content_type, content_id, title, parent_title, parent_id, thumbnail_url, metadata } = req.body;
+  try {
+    // Check if already exists
+    const [existing] = await pool.query(
+      'SELECT * FROM downloads WHERE content_type = ? AND content_id = ?',
+      [content_type, content_id]
+    );
+    
+    if (existing.length > 0) {
+      const dl = existing[0];
+      if (dl.status === 'completed') {
+        return res.status(400).json({ error: 'Already downloaded' });
+      }
+      if (dl.status === 'downloading' || dl.status === 'pending') {
+        return res.status(400).json({ error: 'Already in queue', download: dl });
+      }
+      // If failed or cancelled, allow re-queue by updating status
+      await pool.query(
+        'UPDATE downloads SET status = "pending", error_message = NULL, progress = 0, downloaded_bytes = 0 WHERE id = ?',
+        [dl.id]
+      );
+      return res.json({ id: dl.id, message: 'Re-queued for download' });
+    }
+    
+    const [result] = await pool.query(
+      `INSERT INTO downloads (content_type, content_id, title, parent_title, parent_id, thumbnail_url, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [content_type, content_id, title, parent_title, parent_id, thumbnail_url, JSON.stringify(metadata || {})]
+    );
+    
+    res.json({ id: result.insertId, message: 'Added to download queue' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Cancel a download
+app.post('/api/downloads/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(
+      'UPDATE downloads SET status = "cancelled" WHERE id = ? AND status IN ("pending", "downloading")',
+      [id]
+    );
+    activeDownloads.delete(parseInt(id));
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Retry a failed download
+app.post('/api/downloads/:id/retry', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(
+      'UPDATE downloads SET status = "pending", error_message = NULL, progress = 0, downloaded_bytes = 0 WHERE id = ? AND status IN ("failed", "cancelled")',
+      [id]
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Clear completed/failed downloads
+app.delete('/api/downloads/clear', async (req, res) => {
+  try {
+    const { status } = req.query; // 'completed', 'failed', 'all'
+    if (status === 'all') {
+      await pool.query('DELETE FROM downloads WHERE status IN ("completed", "failed", "cancelled")');
+    } else if (status) {
+      await pool.query('DELETE FROM downloads WHERE status = ?', [status]);
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Delete individual download
+app.delete('/api/downloads/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM downloads WHERE id = ? AND status IN ("completed", "failed", "cancelled")', [id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Process downloads (called by frontend or can be automated)
+app.post('/api/downloads/process', async (req, res) => {
+  try {
+    // Get next pending download
+    const [pending] = await pool.query(
+      'SELECT * FROM downloads WHERE status = "pending" ORDER BY created_at ASC LIMIT 1'
+    );
+    
+    if (pending.length === 0) {
+      return res.json({ message: 'No pending downloads' });
+    }
+    
+    const download = pending[0];
+    const downloadId = download.id;
+    
+    // Mark as downloading
+    await pool.query(
+      'UPDATE downloads SET status = "downloading", started_at = NOW() WHERE id = ?',
+      [downloadId]
+    );
+    
+    // Start download based on content type
+    if (download.content_type === 'manga_chapter') {
+      // Process manga chapter download
+      processMangaChapterDownload(download).catch(err => {
+        console.error('Download failed:', err);
+      });
+    }
+    
+    res.json({ message: 'Download started', download });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Helper function to process manga chapter download with progress tracking
+async function processMangaChapterDownload(download) {
+  const downloadId = download.id;
+  const metadata = typeof download.metadata === 'string' ? JSON.parse(download.metadata) : download.metadata;
+  const { mangaId, chapterNum, thumbnailUrl } = metadata;
+  const chapterId = download.content_id;
+  
+  try {
+    const safeChapterNum = chapterNum ? String(chapterNum).replace(/[^0-9.]/g, '') : '0';
+    const mangaDir = path.join(mangaUploadDir, mangaId);
+    
+    // Check if already exists
+    if (fs.existsSync(mangaDir)) {
+      const existingFiles = fs.readdirSync(mangaDir).filter(f => f.endsWith('.cbz'));
+      const exists = existingFiles.some(f => {
+        const numMatches = f.match(/chapter_([\d.]+)/);
+        const existingNum = numMatches ? parseFloat(numMatches[1]).toString() : null;
+        return existingNum === parseFloat(safeChapterNum).toString();
+      });
+      if (exists) {
+        await pool.query(
+          'UPDATE downloads SET status = "completed", progress = 100, completed_at = NOW() WHERE id = ?',
+          [downloadId]
+        );
+        activeDownloads.delete(downloadId);
+        return;
+      }
+    }
+    
+    // Get chapter pages from MangaDex
+    const resHash = await axiosInstance.get(`https://api.mangadex.org/at-home/server/${chapterId}`);
+    const { baseUrl, chapter } = resHash.data;
+    const pageUrls = chapter.data.map(file => `${baseUrl}/data/${chapter.hash}/${file}`);
+    
+    const totalPages = pageUrls.length;
+    let downloadedBytes = 0;
+    let totalBytes = 0;
+    
+    // Estimate total size (rough estimate based on typical manga page sizes)
+    totalBytes = totalPages * 500000; // ~500KB per page estimate
+    
+    await pool.query('UPDATE downloads SET total_bytes = ? WHERE id = ?', [totalBytes, downloadId]);
+    
+    const zip = new AdmZip();
+    
+    for (let i = 0; i < pageUrls.length; i++) {
+      // Check if cancelled
+      const [current] = await pool.query('SELECT status FROM downloads WHERE id = ?', [downloadId]);
+      if (current.length === 0 || current[0].status === 'cancelled') {
+        activeDownloads.delete(downloadId);
+        return;
+      }
+      
+      const pageRes = await axiosInstance.get(pageUrls[i], { responseType: 'arraybuffer' });
+      const pageData = Buffer.from(pageRes.data);
+      downloadedBytes += pageData.length;
+      
+      const ext = path.extname(pageUrls[i]) || '.jpg';
+      const fileName = `page_${String(i).padStart(3, '0')}${ext}`;
+      zip.addFile(fileName, pageData);
+      
+      // Update progress
+      const progress = Math.round(((i + 1) / totalPages) * 100);
+      activeDownloads.set(downloadId, {
+        progress,
+        downloaded_bytes: downloadedBytes,
+        total_bytes: Math.max(totalBytes, downloadedBytes),
+        current_page: i + 1,
+        total_pages: totalPages
+      });
+      
+      // Update DB periodically (every 5 pages or last page)
+      if (i % 5 === 0 || i === totalPages - 1) {
+        await pool.query(
+          'UPDATE downloads SET progress = ?, downloaded_bytes = ?, total_bytes = ? WHERE id = ?',
+          [progress, downloadedBytes, Math.max(totalBytes, downloadedBytes), downloadId]
+        );
+      }
+    }
+    
+    // Save the CBZ file
+    if (!fs.existsSync(mangaDir)) fs.mkdirSync(mangaDir, { recursive: true });
+    
+    const filename = `chapter_${safeChapterNum.padStart(4, '0')}_${Date.now()}.cbz`;
+    const dest = path.join(mangaDir, filename);
+    zip.writeZip(dest);
+    
+    // Update/create manga entry in books table
+    const [existing] = await pool.query('SELECT * FROM books WHERE source_url = ?', [mangaId]);
+    
+    let localThumb = null;
+    if (thumbnailUrl) {
+      const ext = path.extname(thumbnailUrl.split('?')[0]) || '.jpg';
+      const thumbFilename = `thumb-manga-${mangaId}${ext}`;
+      const thumbDest = path.join(thumbUploadDir, thumbFilename);
+      try {
+        if (!fs.existsSync(thumbDest)) {
+          await downloadFile(thumbnailUrl, thumbDest);
+        }
+        localThumb = `/uploads/thumbnails/${thumbFilename}`;
+      } catch (e) { console.error('Thumb dl failed', e.message); }
+    }
+    
+    if (existing.length === 0) {
+      await pool.query(
+        'INSERT INTO books (title, author, type, source, source_url, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?)',
+        [download.parent_title, 'MangaDex Archive', 'manga', 'local', mangaId, localThumb]
+      );
+    } else {
+      await pool.query(
+        'UPDATE books SET source = "local", type = "manga", thumbnail_url = COALESCE(?, thumbnail_url) WHERE source_url = ?',
+        [localThumb, mangaId]
+      );
+    }
+    
+    // Mark as completed
+    await pool.query(
+      'UPDATE downloads SET status = "completed", progress = 100, downloaded_bytes = ?, total_bytes = ?, completed_at = NOW() WHERE id = ?',
+      [downloadedBytes, downloadedBytes, downloadId]
+    );
+    activeDownloads.delete(downloadId);
+    
+  } catch (err) {
+    console.error('Download error:', err);
+    await pool.query(
+      'UPDATE downloads SET status = "failed", error_message = ? WHERE id = ?',
+      [err.message, downloadId]
+    );
+    activeDownloads.delete(downloadId);
+  }
+}
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Archive Pulse running on http://127.0.0.1:${PORT}`));

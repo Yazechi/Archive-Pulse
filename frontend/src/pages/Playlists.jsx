@@ -17,15 +17,17 @@ const Playlists = () => {
 
   const fetchPlaylists = async () => {
     try {
-      const [resPlaylists, resRecentlyAdded, resRecentlyPlayed] = await Promise.all([
+      const [resPlaylists, resRecentlyAdded, resRecentlyPlayed, resFavorites] = await Promise.all([
         axios.get('http://127.0.0.1:5000/api/playlists'),
         axios.get('http://127.0.0.1:5000/api/songs/smart/recently-added'),
-        axios.get('http://127.0.0.1:5000/api/songs/smart/recently-played')
+        axios.get('http://127.0.0.1:5000/api/songs/smart/recently-played'),
+        axios.get('http://127.0.0.1:5000/api/songs/smart/favorites')
       ]);
       setPlaylists(resPlaylists.data);
       setSmartPlaylists({
         recentlyAdded: resRecentlyAdded.data,
-        recentlyPlayed: resRecentlyPlayed.data
+        recentlyPlayed: resRecentlyPlayed.data,
+        favorites: resFavorites.data
       });
     } catch (err) { console.error(err); } finally { setLoading(false); }
   };
@@ -80,6 +82,7 @@ const Playlists = () => {
   const smartCollections = [
     { id: 'recentlyAdded',  name: 'RECENT_ACQUISITIONS', isSmart: true, icon: <Clock size={20} />, songs: smartPlaylists.recentlyAdded },
     { id: 'recentlyPlayed', name: 'NEURAL_HISTORY', isSmart: true, icon: <History size={20} />, songs: smartPlaylists.recentlyPlayed },
+    { id: 'favorites', name: 'FAVORITES', isSmart: true, icon: <Activity size={20} />, songs: smartPlaylists.favorites },
   ];
 
   return (

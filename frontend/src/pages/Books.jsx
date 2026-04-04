@@ -2,7 +2,9 @@ import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '../context/ToastContext';
-import { Trash2, FolderPlus, RefreshCcw, CheckSquare, Square, Library, Layers, Plus, X, ArrowLeft } from 'lucide-react';
+import { Trash2, FolderPlus, RefreshCcw, CheckSquare, Square, Library, Layers, Plus, X, ArrowLeft, MessageSquareText } from 'lucide-react';
+import { TagSelector, TagBadge } from '../components/TagManager';
+import { FavoriteButton, useFavorites } from '../components/FavoriteButton';
 
 const API_BASE = 'http://127.0.0.1:5000';
 const normalizeProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
@@ -17,7 +19,14 @@ const Books = () => {
   const [selectedBooks, setSelectedBooks] = useState(new Set());
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showCreateSeriesModal, setShowCreateSeriesModal] = useState(false);
+  const [editingBook, setEditingBook] = useState(null);
+  const [editForm, setEditForm] = useState({ title: '', author: '', volume_number: '', genres: '' });
   const [newSeries, setNewSeries] = useState({ title: '', author: '', description: '' });
+  const [bookTags, setBookTags] = useState({});
+  const [annotations, setAnnotations] = useState([]);
+  const [annotationCounts, setAnnotationCounts] = useState({});
+  const [showAnnotationsModal, setShowAnnotationsModal] = useState(false);
+  const { fetchFavorites, isFavorite, setFavoriteState } = useFavorites('book');
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -30,10 +39,39 @@ const Books = () => {
       ]);
       setBooks(bRes.data);
       setSeries(sRes.data);
+      const annoRes = await axios.get(`${API_BASE}/api/annotations`);
+      const ann = Array.isArray(annoRes.data) ? annoRes.data : [];
+      setAnnotations(ann);
+      const counts = ann.reduce((acc, row) => {
+        acc[row.book_id] = (acc[row.book_id] || 0) + 1;
+        return acc;
+      }, {});
+      setAnnotationCounts(counts);
     } catch (err) { console.error(err); } finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchData(); }, []);
+  const fetchTagsForBooks = async (booksList) => {
+    try {
+      const tagEntries = await Promise.all(
+        booksList.map(async (item) => {
+          const res = await axios.get(`${API_BASE}/api/tags/content/book/${item.id}`);
+          return [item.id, res.data];
+        })
+      );
+      setBookTags(Object.fromEntries(tagEntries));
+    } catch (err) {
+      console.error('Failed to fetch book tags', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    fetchFavorites();
+  }, []);
+
+  useEffect(() => {
+    if (books.length > 0) fetchTagsForBooks(books);
+  }, [books]);
 
   const deleteBook = async (id) => {
     if (!window.confirm('Erase this manuscript?')) return;
@@ -87,6 +125,35 @@ const Books = () => {
       fetchData();
       toast.success('Series node created successfully');
     } catch (err) { toast.error('Failed to create series'); }
+  };
+
+  const openEditModal = (book, e) => {
+    e.stopPropagation();
+    const tags = (bookTags[book.id] || []).map((t) => t.name).join(', ');
+    setEditForm({
+      title: book.title || '',
+      author: book.author || '',
+      volume_number: book.volume_number ?? '',
+      genres: tags,
+    });
+    setEditingBook(book);
+  };
+
+  const saveBookMetadata = async () => {
+    if (!editingBook) return;
+    try {
+      await axios.put(`${API_BASE}/api/books/${editingBook.id}/metadata`, {
+        title: editForm.title,
+        author: editForm.author,
+        volume_number: editForm.volume_number === '' ? null : Number(editForm.volume_number),
+        genres: editForm.genres
+      });
+      await fetchData();
+      toast.success('Book metadata updated');
+      setEditingBook(null);
+    } catch (err) {
+      toast.error('Failed to update metadata');
+    }
   };
 
   // Filter logic for the main view
@@ -155,7 +222,10 @@ const Books = () => {
               {isBatchMode ? 'Cancel Selection' : 'Batch Select'}
             </button>
             
-            <button onClick={fetchData} className="btn-icon"><RefreshCcw size={18} /></button>
+              <button onClick={fetchData} className="btn-icon"><RefreshCcw size={18} /></button>
+              <button onClick={() => setShowAnnotationsModal(true)} className="btn-secondary uppercase tracking-wider">
+                <MessageSquareText size={16} /> Annotations
+              </button>
             
             {!selectedSeries && (
               <div className="flex p-1 bg-white/5 border border-white/10 rounded-xl">
@@ -216,17 +286,27 @@ const Books = () => {
                     next.has(book.id) ? next.delete(book.id) : next.add(book.id);
                     setSelectedBooks(next);
                   } else {
-                    navigate('/reader', { state: { book } });
+                    if (book.type === 'manga') {
+                      navigate('/manga-chapters', { state: { book } });
+                    } else {
+                      navigate('/reader', { state: { book } });
+                    }
                   }
                 }}
               >
                 <div className={`aspect-[2/3] rounded-[2rem] border border-white/5 bg-zinc-900 relative overflow-hidden transition-all duration-500 ${isSelected ? 'border-primary shadow-[0_0_20px_var(--color-primary-dim)]' : 'group-hover:border-primary/40'}`}>
                   <img src={book.thumbnail_url?.startsWith('http') ? book.thumbnail_url : `${API_BASE}${book.thumbnail_url}`} className="w-full h-full object-cover opacity-60 grayscale group-hover:opacity-100 group-hover:grayscale-0 transition-all duration-700" alt="" />
-                  
-                  {/* Progress */}
-                  <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-white/5">
-                    <div className="h-full bg-primary shadow-[0_0_10px_var(--color-primary)]" style={{ width: `${normalizeProgress(book.progress)}%` }} />
-                  </div>
+                  {book.volume_number !== null && book.volume_number !== undefined && (
+                    <span className="absolute bottom-3 right-3 px-2 py-0.5 rounded-md bg-black/70 border border-white/20 text-[9px] font-bold tracking-wider text-primary">
+                      Vol {book.volume_number}
+                    </span>
+                  )}
+                   
+                  {book.type !== 'manga' && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-white/5">
+                      <div className="h-full bg-primary shadow-[0_0_10px_var(--color-primary)]" style={{ width: `${normalizeProgress(book.progress)}%` }} />
+                    </div>
+                  )}
 
                   {isSelected && <div className="absolute inset-0 bg-primary/20 flex items-center justify-center"><CheckSquare size={48} className="text-primary" /></div>}
                   
@@ -235,7 +315,26 @@ const Books = () => {
                   </div>
 
                   {!isBatchMode && (
-                    <button onClick={(e) => { e.stopPropagation(); deleteBook(book.id); }} className="absolute top-4 right-4 p-2 bg-black/60 rounded-lg text-white/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"><Trash2 size={16} /></button>
+                    <div className="absolute top-4 right-4 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <TagSelector
+                          contentType="book"
+                          contentId={book.id}
+                          selectedTags={bookTags[book.id] || []}
+                          onTagsChange={(tags) => setBookTags((prev) => ({ ...prev, [book.id]: tags }))}
+                          position="bottom"
+                        />
+                      </div>
+                      <FavoriteButton
+                        contentType="book"
+                        contentId={book.id}
+                        isFavorite={isFavorite(book.id)}
+                        onToggle={(next) => setFavoriteState(book.id, next)}
+                        size="sm"
+                      />
+                      <button onClick={(e) => openEditModal(book, e)} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-primary">Edit</button>
+                      <button onClick={(e) => { e.stopPropagation(); deleteBook(book.id); }} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-red-400"><Trash2 size={16} /></button>
+                    </div>
                   )}
                 </div>
 
@@ -243,8 +342,29 @@ const Books = () => {
                   <h3 className="text-[15px] font-bold text-white uppercase truncate group-hover:text-primary transition-colors tracking-tight">{book.title}</h3>
                   <div className="flex items-center justify-between">
                     <span className="font-mono text-[9px] text-zinc-600 uppercase tracking-widest">{book.author}</span>
-                    <span className="font-mono text-[9px] text-primary">{Math.round(normalizeProgress(book.progress))}%</span>
+                    <span className="font-mono text-[9px] text-primary">
+                      {book.type === 'manga'
+                        ? (book.last_chapter_title ? `Last: ${book.last_chapter_title}` : 'Last: none')
+                        : `${Math.round(normalizeProgress(book.progress))}%`}
+                    </span>
                   </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(bookTags[book.id] || []).slice(0, 3).map((tag) => (
+                      <TagBadge key={tag.id} tag={tag} size="xs" />
+                    ))}
+                  </div>
+                  {(annotationCounts[book.id] || 0) > 0 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate('/reader', { state: { book } });
+                      }}
+                      className="mt-2 inline-flex items-center gap-1 text-[10px] text-primary hover:text-white transition-colors"
+                    >
+                      <MessageSquareText size={12} />
+                      {(annotationCounts[book.id] || 0)} annotation{annotationCounts[book.id] > 1 ? 's' : ''}
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -294,6 +414,63 @@ const Books = () => {
               </div>
               <button type="submit" className="w-full btn-primary btn-lg uppercase tracking-wider justify-center">Integrate Series</button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {editingBook && (
+        <div className="overlay z-[350] flex items-center justify-center p-6 animate-in">
+          <div className="modal w-full max-w-lg p-8 relative">
+            <button onClick={() => setEditingBook(null)} className="absolute top-6 right-6 text-zinc-500 hover:text-white"><X size={22} /></button>
+            <h3 className="heading-sm mb-2">Edit Book Metadata</h3>
+            <p className="tech-label-sm mb-6">Update volume and tags (genres)</p>
+            <div className="space-y-4">
+              <input className="input" value={editForm.title} onChange={(e) => setEditForm((v) => ({ ...v, title: e.target.value }))} placeholder="Title" />
+              <input className="input" value={editForm.author} onChange={(e) => setEditForm((v) => ({ ...v, author: e.target.value }))} placeholder="Author" />
+              <input className="input" value={editForm.volume_number} onChange={(e) => setEditForm((v) => ({ ...v, volume_number: e.target.value }))} placeholder="Volume Number" />
+              <input className="input" value={editForm.genres} onChange={(e) => setEditForm((v) => ({ ...v, genres: e.target.value }))} placeholder="Genres as tags (comma separated)" />
+            </div>
+            <div className="mt-6 flex gap-3">
+              <button onClick={saveBookMetadata} className="btn-primary">Save</button>
+              <button onClick={() => setEditingBook(null)} className="btn-secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAnnotationsModal && (
+        <div className="overlay z-[360] flex items-center justify-center p-6 animate-in">
+          <div className="modal w-full max-w-3xl p-8 relative">
+            <button onClick={() => setShowAnnotationsModal(false)} className="absolute top-6 right-6 text-zinc-500 hover:text-white"><X size={22} /></button>
+            <h3 className="heading-sm mb-2">Reading Annotations</h3>
+            <p className="tech-label-sm mb-6">Highlights and notes across your books</p>
+            <div className="max-h-[60vh] overflow-y-auto space-y-3 pr-2">
+              {annotations.length === 0 ? (
+                <div className="py-10 text-center tech-label">No annotations yet. Open a book and highlight text in Reader.</div>
+              ) : (
+                annotations.slice(0, 120).map((item) => {
+                  const targetBook = books.find((b) => b.id === item.book_id);
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        if (!targetBook) return;
+                        setShowAnnotationsModal(false);
+                        navigate('/reader', { state: { book: targetBook } });
+                      }}
+                      className="w-full text-left p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-primary/40 transition-all"
+                    >
+                      <div className="flex items-center justify-between gap-4">
+                        <p className="text-sm font-semibold text-white truncate">{item.book_title || targetBook?.title || 'Book'}</p>
+                        <span className="tech-label-sm">{new Date(item.created_at).toLocaleDateString()}</span>
+                      </div>
+                      <p className="mt-2 text-xs text-white/70 line-clamp-2">{item.text_excerpt}</p>
+                      {item.note && <p className="mt-2 text-xs text-primary/90 line-clamp-2">Note: {item.note}</p>}
+                    </button>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}

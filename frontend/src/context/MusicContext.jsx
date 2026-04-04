@@ -294,6 +294,20 @@ export const MusicProvider = ({ children }) => {
     try {
       await audioRef.current.play();
       setIsPlaying(true);
+      
+      // Log play activity (fire and forget)
+      fetch('http://127.0.0.1:5000/api/activity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action_type: 'play',
+          content_type: 'song',
+          content_id: track.id,
+          content_title: track.title,
+          content_thumbnail: track.thumbnail_url
+        })
+      }).catch(() => {}); // Ignore errors
+      
       return true;
     } catch (error) {
       console.error('Playback failed', error);

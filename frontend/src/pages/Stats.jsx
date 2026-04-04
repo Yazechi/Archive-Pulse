@@ -1,0 +1,364 @@
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+import { 
+  BookOpen, Music, Film, Clock, Calendar, TrendingUp, 
+  Award, Target, Flame, BarChart3, PieChart, Heart, DownloadCloud, StickyNote
+} from 'lucide-react';
+
+const API_BASE = 'http://127.0.0.1:5000';
+
+const Stats = () => {
+  const [readingStats, setReadingStats] = useState(null);
+  const [activityStats, setActivityStats] = useState(null);
+  const [generalStats, setGeneralStats] = useState(null);
+  const [favoritesStats, setFavoritesStats] = useState({ total: 0, songs: 0, books: 0, videos: 0 });
+  const [downloadsStats, setDownloadsStats] = useState({ active: 0, completed: 0, failed: 0 });
+  const [annotationStats, setAnnotationStats] = useState({ total: 0, withNotes: 0 });
+  const [loading, setLoading] = useState(true);
+  const [timeRange, setTimeRange] = useState(30); // days
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      setLoading(true);
+      try {
+        const [readingRes, activityRes, generalRes, favoritesRes, downloadsRes, annotationsRes] = await Promise.all([
+          axios.get(`${API_BASE}/api/stats/reading?days=${timeRange}`),
+          axios.get(`${API_BASE}/api/activity/stats?days=${timeRange}`),
+          axios.get(`${API_BASE}/api/stats`),
+          axios.get(`${API_BASE}/api/favorites`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/downloads`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/annotations`).catch(() => ({ data: [] }))
+        ]);
+        setReadingStats(readingRes.data);
+        setActivityStats(activityRes.data);
+        setGeneralStats(generalRes.data);
+        const favorites = Array.isArray(favoritesRes.data) ? favoritesRes.data : [];
+        setFavoritesStats({
+          total: favorites.length,
+          songs: favorites.filter((f) => f.content_type === 'song').length,
+          books: favorites.filter((f) => f.content_type === 'book').length,
+          videos: favorites.filter((f) => f.content_type === 'video').length,
+        });
+        const downloads = Array.isArray(downloadsRes.data) ? downloadsRes.data : [];
+        setDownloadsStats({
+          active: downloads.filter((d) => d.status === 'downloading' || d.status === 'pending').length,
+          completed: downloads.filter((d) => d.status === 'completed').length,
+          failed: downloads.filter((d) => d.status === 'failed').length,
+        });
+        const annotations = Array.isArray(annotationsRes.data) ? annotationsRes.data : [];
+        setAnnotationStats({
+          total: annotations.length,
+          withNotes: annotations.filter((a) => a.note && a.note.trim()).length,
+        });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStats();
+  }, [timeRange]);
+
+  const formatDuration = (seconds) => {
+    if (!seconds) return '0m';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+  };
+
+  const StatCard = ({ icon: Icon, label, value, subValue, color = 'primary' }) => (
+    <div className="card p-6 space-y-4">
+      <div className="flex items-center gap-3">
+        <div className={`w-10 h-10 rounded-xl bg-${color}/10 flex items-center justify-center`}>
+          <Icon size={20} className={`text-${color}`} />
+        </div>
+        <span className="tech-label">{label}</span>
+      </div>
+      <div>
+        <p className="text-3xl font-display font-bold text-white">{value}</p>
+        {subValue && <p className="tech-label-sm mt-1">{subValue}</p>}
+      </div>
+    </div>
+  );
+
+  // Simple bar chart component
+  const MiniBarChart = ({ data, label }) => {
+    const maxValue = Math.max(...data.map(d => d.value), 1);
+    return (
+      <div className="space-y-2">
+        <p className="tech-label">{label}</p>
+        <div className="flex items-end gap-1 h-20">
+          {data.slice(-14).map((d, i) => (
+            <div key={i} className="flex-1 flex flex-col items-center gap-1">
+              <div
+                className="w-full bg-primary/60 rounded-t transition-all hover:bg-primary"
+                style={{ height: `${(d.value / maxValue) * 100}%`, minHeight: d.value > 0 ? '4px' : '0' }}
+              />
+              <span className="text-[8px] text-white/30">{d.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="page-shell flex items-center justify-center min-h-[60vh]">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          <p className="tech-label">Loading statistics...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Prepare chart data
+  const readingChartData = (readingStats?.dailyReading || []).map(d => ({
+    value: d.pages || 0,
+    label: new Date(d.date).getDate()
+  })).reverse();
+
+  const listeningChartData = (activityStats?.dailyActivity || [])
+    .filter(d => d.content_type === 'song')
+    .map(d => ({
+      value: d.count || 0,
+      label: new Date(d.date).getDate()
+    })).reverse();
+
+  return (
+    <div className="page-shell">
+      <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-8 border-b border-border pb-8">
+        <div className="space-y-4">
+          <div className="flex items-center gap-3">
+            <span className="status-online" />
+            <span className="tech-label text-primary">Analytics_Module</span>
+          </div>
+          <h1 className="heading-lg">Statistics</h1>
+          <p className="tech-label-sm">Your archive activity insights</p>
+        </div>
+        
+        <div className="flex p-1 bg-white/5 border border-white/10 rounded-xl">
+          {[7, 30, 90].map(days => (
+            <button
+              key={days}
+              onClick={() => setTimeRange(days)}
+              className={`px-5 py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider transition-all ${
+                timeRange === days ? 'bg-primary text-black' : 'text-white/50 hover:text-white'
+              }`}
+            >
+              {days}d
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {/* Library Overview */}
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <BarChart3 size={20} className="text-primary" />
+          Library Overview
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard
+            icon={Music}
+            label="Total Songs"
+            value={generalStats?.songs || 0}
+            subValue={generalStats?.musicDuration || '0m total'}
+          />
+          <StatCard
+            icon={BookOpen}
+            label="Total Books"
+            value={(generalStats?.books || 0) + (generalStats?.mangas || 0)}
+            subValue={`${generalStats?.books || 0} books, ${generalStats?.mangas || 0} manga`}
+          />
+          <StatCard
+            icon={Film}
+            label="Playlists"
+            value={generalStats?.playlists || 0}
+          />
+          <StatCard
+            icon={Target}
+            label="Series"
+            value={generalStats?.series || 0}
+          />
+        </div>
+      </section>
+
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <TrendingUp size={20} className="text-cyan-400" />
+          Engagement Insights
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard
+            icon={Heart}
+            label="Favorites"
+            value={favoritesStats.total}
+            subValue={`${favoritesStats.songs} songs • ${favoritesStats.books} books • ${favoritesStats.videos} videos`}
+          />
+          <StatCard
+            icon={StickyNote}
+            label="Annotations"
+            value={annotationStats.total}
+            subValue={`${annotationStats.withNotes} with notes`}
+          />
+          <StatCard
+            icon={DownloadCloud}
+            label="Downloads Done"
+            value={downloadsStats.completed}
+            subValue={`${downloadsStats.active} active • ${downloadsStats.failed} failed`}
+          />
+          <StatCard
+            icon={Calendar}
+            label="Tracked Days"
+            value={timeRange}
+            subValue="current window"
+          />
+        </div>
+      </section>
+
+      {/* Reading Statistics */}
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <BookOpen size={20} className="text-blue-400" />
+          Reading Statistics
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard
+            icon={Clock}
+            label="Reading Time"
+            value={formatDuration(readingStats?.totalSeconds)}
+            subValue={`Last ${timeRange} days`}
+          />
+          <StatCard
+            icon={Target}
+            label="Pages Read"
+            value={readingStats?.totalPages || 0}
+            subValue={`~${readingStats?.avgPagesPerSession || 0} per session`}
+          />
+          <StatCard
+            icon={Award}
+            label="Books Completed"
+            value={readingStats?.booksCompleted || 0}
+          />
+          <StatCard
+            icon={Flame}
+            label="Reading Streak"
+            value={`${readingStats?.currentStreak || 0} days`}
+            subValue="Keep it up!"
+          />
+        </div>
+
+        {/* Reading Chart */}
+        <div className="card p-6">
+          <MiniBarChart data={readingChartData} label="Pages read per day" />
+        </div>
+
+        {/* Top Books */}
+        {readingStats?.topBooks?.length > 0 && (
+          <div className="card p-6 space-y-4">
+            <h3 className="tech-label">Most Read Books</h3>
+            <div className="space-y-3">
+              {readingStats.topBooks.slice(0, 5).map((book, i) => (
+                <div key={book.id} className="flex items-center gap-4">
+                  <span className="w-6 text-center font-mono text-sm text-white/40">{i + 1}</span>
+                  <div className="w-10 h-14 rounded-lg overflow-hidden bg-zinc-900 border border-border shrink-0">
+                    {book.thumbnail_url && (
+                      <img
+                        src={book.thumbnail_url.startsWith('http') ? book.thumbnail_url : `${API_BASE}${book.thumbnail_url}`}
+                        className="w-full h-full object-cover"
+                        alt=""
+                      />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">{book.title}</p>
+                    <p className="tech-label-sm">{book.author}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-primary">{formatDuration(book.total_time)}</p>
+                    <p className="tech-label-sm">{book.total_pages} pages</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Listening Statistics */}
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <Music size={20} className="text-green-400" />
+          Listening Statistics
+        </h2>
+
+        {/* Listening Chart */}
+        <div className="card p-6">
+          <MiniBarChart data={listeningChartData} label="Songs played per day" />
+        </div>
+
+        {/* Top Songs */}
+        {activityStats?.topSongs?.length > 0 && (
+          <div className="card p-6 space-y-4">
+            <h3 className="tech-label">Most Played Songs</h3>
+            <div className="space-y-3">
+              {activityStats.topSongs.slice(0, 5).map((song, i) => (
+                <div key={i} className="flex items-center gap-4">
+                  <span className="w-6 text-center font-mono text-sm text-white/40">{i + 1}</span>
+                  <div className="w-10 h-10 rounded-lg overflow-hidden bg-zinc-900 border border-border shrink-0">
+                    {song.content_thumbnail && (
+                      <img
+                        src={song.content_thumbnail.startsWith('http') ? song.content_thumbnail : `${API_BASE}${song.content_thumbnail}`}
+                        className="w-full h-full object-cover"
+                        alt=""
+                      />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">{song.content_title}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-primary">{song.play_count} plays</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Reading Habits */}
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <PieChart size={20} className="text-purple-400" />
+          Reading Habits
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="card p-6 text-center">
+            <p className="text-4xl font-display font-bold text-green-400">
+              {generalStats?.readingHabits?.completed || 0}
+            </p>
+            <p className="tech-label mt-2">Completed</p>
+          </div>
+          <div className="card p-6 text-center">
+            <p className="text-4xl font-display font-bold text-yellow-400">
+              {generalStats?.readingHabits?.inProgress || 0}
+            </p>
+            <p className="tech-label mt-2">In Progress</p>
+          </div>
+          <div className="card p-6 text-center">
+            <p className="text-4xl font-display font-bold text-white/40">
+              {Math.max(0, (generalStats?.books || 0) + (generalStats?.mangas || 0) - (generalStats?.readingHabits?.completed || 0) - (generalStats?.readingHabits?.inProgress || 0))}
+            </p>
+            <p className="tech-label mt-2">Not Started</p>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+};
+
+export default Stats;

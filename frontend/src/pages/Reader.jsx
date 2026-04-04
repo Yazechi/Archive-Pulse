@@ -18,6 +18,9 @@ import {
   Music2,
   Highlighter,
   Trash2,
+  Edit3,
+  MessageSquare,
+  CheckCircle,
 } from 'lucide-react';
 import PdfPane from '../components/reader/PdfPane';
 import { useMusic } from '../context/useMusic';
@@ -110,13 +113,102 @@ const ReaderMiniPlayer = () => {
   );
 };
 
+// Highlight Card with Notes
+const HighlightCard = ({ highlight, bookId, onDelete, onUpdate }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [note, setNote] = useState(highlight.note || '');
+  const [saving, setSaving] = useState(false);
+
+  const saveNote = async () => {
+    if (note === (highlight.note || '')) {
+      setIsEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await axios.put(`${API_BASE}/api/books/${bookId}/highlights/${highlight.id}`, { note });
+      onUpdate({ note });
+      setIsEditing(false);
+    } catch (err) {
+      console.error('Failed to save note', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/5 p-2.5 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[10px] text-white/70 line-clamp-3">{highlight.text_excerpt}</p>
+        <div className="flex items-center gap-1">
+          <button 
+            onClick={() => setIsEditing(!isEditing)} 
+            className="text-white/40 hover:text-primary"
+            title="Add note"
+          >
+            <MessageSquare size={12} />
+          </button>
+          <button onClick={onDelete} className="text-white/40 hover:text-red-400">
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </div>
+      
+      {/* Note Section */}
+      {(isEditing || highlight.note) && (
+        <div className="pt-2 border-t border-white/10">
+          {isEditing ? (
+            <div className="space-y-2">
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Add your note..."
+                className="w-full bg-black/30 border border-white/10 rounded-lg p-2 text-[10px] text-white/80 placeholder:text-white/30 focus:outline-none focus:border-primary/50 resize-none"
+                rows={3}
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button 
+                  onClick={saveNote}
+                  disabled={saving}
+                  className="flex-1 text-[9px] py-1.5 bg-primary/20 text-primary rounded-lg hover:bg-primary/30"
+                >
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+                <button 
+                  onClick={() => { setIsEditing(false); setNote(highlight.note || ''); }}
+                  className="flex-1 text-[9px] py-1.5 bg-white/5 text-white/50 rounded-lg hover:bg-white/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-[10px] text-white/50 italic cursor-pointer hover:text-white/70" onClick={() => setIsEditing(true)}>
+              {highlight.note}
+            </p>
+          )}
+        </div>
+      )}
+      
+      <div className="flex items-center gap-2">
+        <span className="w-3 h-3 rounded-sm border border-white/20" style={{ backgroundColor: highlight.color || '#fde047' }} />
+        <span className="text-[9px] text-white/40">{new Date(highlight.created_at).toLocaleDateString()}</span>
+        {highlight.note && !isEditing && (
+          <span className="text-[9px] text-primary/60 ml-auto">Has note</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const clampProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
 
 const Reader = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const toast = useToast();
-  const { book: initialBook } = location.state || {};
+  const { book: initialBook, chapter: initialChapter } = location.state || {};
 
   const [book, setBook] = useState(initialBook || null);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -139,6 +231,10 @@ const Reader = () => {
   const [selectedColor, setSelectedColor] = useState(HIGHLIGHT_COLORS[0]);
   const [pendingSelection, setPendingSelection] = useState(null);
   const [showHighlightsPanel, setShowHighlightsPanel] = useState(true);
+  const [mangaChapters, setMangaChapters] = useState([]);
+  const [loadingMangaChapters, setLoadingMangaChapters] = useState(false);
+  const [mangaPages, setMangaPages] = useState([]);
+  const [currentChapterIndex, setCurrentChapterIndex] = useState(-1);
 
   const readerRef = useRef(null);
   const renditionRef = useRef(null);
@@ -180,6 +276,52 @@ const Reader = () => {
     }, 400);
   };
 
+  // Reading session tracking
+  const sessionIdRef = useRef(null);
+  const startPageRef = useRef(null);
+
+  useEffect(() => {
+    // Start reading session when reader opens
+    if (!book?.id || !readerDataLoaded) return;
+    
+    const startSession = async () => {
+      try {
+        const startPage = isPdf ? pageNumber : 0;
+        startPageRef.current = startPage;
+        const res = await axios.post(`${API_BASE}/api/reading-sessions/start`, {
+          book_id: book.id,
+          start_page: startPage
+        });
+        sessionIdRef.current = res.data.session_id;
+        
+        // Log activity
+        axios.post(`${API_BASE}/api/activity`, {
+          action_type: 'read',
+          content_type: 'book',
+          content_id: book.id,
+          content_title: book.title,
+          content_thumbnail: book.thumbnail_url
+        }).catch(() => {});
+      } catch (err) {
+        console.error('Failed to start reading session', err);
+      }
+    };
+    
+    startSession();
+    
+    // End session on unmount
+    return () => {
+      if (sessionIdRef.current) {
+        const endPage = isPdf ? pageNumber : 0;
+        const pagesRead = Math.abs(endPage - (startPageRef.current || 0));
+        axios.put(`${API_BASE}/api/reading-sessions/${sessionIdRef.current}/end`, {
+          end_page: endPage,
+          pages_read: pagesRead
+        }).catch(() => {});
+      }
+    };
+  }, [book?.id, readerDataLoaded]);
+
   useEffect(() => () => {
     if (progressTimerRef.current) clearTimeout(progressTimerRef.current);
   }, []);
@@ -199,7 +341,7 @@ const Reader = () => {
         setHighlights(Array.isArray(highlightRes.data) ? highlightRes.data : []);
         setReadingProgress(clampProgress(freshBook.progress));
         if (freshBook.last_cfi) setEpubLocation(freshBook.last_cfi);
-        if (freshBook.last_page) {
+        if (freshBook.last_page && freshBook.type !== 'manga') {
           const savedPage = Number(freshBook.last_page);
           if (Number.isFinite(savedPage) && savedPage > 0) setPageNumber(Math.floor(savedPage));
         }
@@ -212,6 +354,116 @@ const Reader = () => {
     loadReaderData();
     return () => { mounted = false; };
   }, [initialBook?.id]);
+
+  useEffect(() => {
+    if (!isManga || !book?.source_url) return;
+    const loadMangaChapters = async () => {
+      try {
+        setLoadingMangaChapters(true);
+        const [localRes, onlineRes] = await Promise.all([
+          axios.get(`${API_BASE}/api/manga/local/${book.source_url}/chapters`).catch(() => ({ data: [] })),
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(book.source_url)
+            ? axios.get(`${API_BASE}/api/manga/${book.source_url}/chapters`).catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] })
+        ]);
+
+        const localChapters = (Array.isArray(localRes.data) ? localRes.data : []).map((c) => ({ ...c, isLocal: true }));
+        const onlineChapters = (Array.isArray(onlineRes.data) ? onlineRes.data : []).map((c) => ({ ...c, isLocal: false }));
+        const chapters = [...onlineChapters, ...localChapters];
+        setMangaChapters(chapters);
+
+        setShowToc(false);
+
+        // Resume to saved chapter or fallback to latest local chapter
+        const savedChapterPath = (book.last_page || '').toString();
+        const savedId = savedChapterPath.includes('/uploads/manga/')
+          ? savedChapterPath.split('/').pop()
+          : savedChapterPath || null;
+        const targetChapter =
+          chapters.find((c) => c.id === initialChapter?.id) ||
+          chapters.find((c) => c.id === savedId) ||
+          localChapters[localChapters.length - 1] ||
+          onlineChapters[onlineChapters.length - 1] ||
+          null;
+        if (targetChapter) {
+          await openMangaChapter(targetChapter, false, chapters);
+        }
+      } catch (err) {
+        console.error('Failed to load manga chapters/pages', err);
+      } finally {
+        setLoadingMangaChapters(false);
+      }
+    };
+    loadMangaChapters();
+  }, [isManga, book?.source_url, book?.last_page, initialChapter?.id]);
+
+  const openMangaChapter = useCallback(async (chapter, closeToc = true, chaptersArr = null) => {
+    if (!book?.id || !chapter?.id) return;
+    // Use passed chapters array or fall back to state
+    const chaptersToUse = chaptersArr || mangaChapters;
+    try {
+      const endpoint = chapter.isLocal
+        ? `${API_BASE}/api/manga/local/${book.source_url}/chapter/${encodeURIComponent(chapter.id)}/pages`
+        : `${API_BASE}/api/manga/chapter/${encodeURIComponent(chapter.id)}/pages`;
+      const pagesRes = await axios.get(endpoint);
+      const pages = Array.isArray(pagesRes.data) ? pagesRes.data : [];
+      setMangaPages(pages);
+      const chapterTitle = chapter.title || `Chapter ${chapter.chapter || '?'}`;
+      setCurrentChapter(chapterTitle);
+      
+      // Track chapter index for navigation
+      const idx = chaptersToUse.findIndex(c => c.id === chapter.id);
+      setCurrentChapterIndex(idx);
+      
+      if (closeToc) setShowToc(false);
+      await axios.put(`${API_BASE}/api/books/${book.id}/progress`, {
+        last_page: chapter.id,
+        last_chapter_title: chapterTitle
+      });
+      
+      // Log activity with chapter info
+      await axios.post(`${API_BASE}/api/activity`, {
+        action_type: 'read',
+        content_type: 'book',
+        content_id: book.id,
+        content_title: `${book.title} - ${chapterTitle}`,
+        content_thumbnail: book.thumbnail_url,
+        metadata: { chapter: chapterTitle, chapter_id: chapter.id }
+      }).catch(() => {});
+    } catch (err) {
+      console.error('Failed to open manga chapter', err);
+      toast.error('Failed to open chapter');
+    }
+  }, [book?.id, book?.source_url, book?.title, book?.thumbnail_url, mangaChapters, toast]);
+
+  const goToNextChapter = useCallback(() => {
+    if (currentChapterIndex < 0 || currentChapterIndex >= mangaChapters.length - 1) return;
+    const nextChapter = mangaChapters[currentChapterIndex + 1];
+    if (nextChapter) openMangaChapter(nextChapter);
+  }, [currentChapterIndex, mangaChapters, openMangaChapter]);
+
+  const goToPrevChapter = useCallback(() => {
+    if (currentChapterIndex <= 0) return;
+    const prevChapter = mangaChapters[currentChapterIndex - 1];
+    if (prevChapter) openMangaChapter(prevChapter);
+  }, [currentChapterIndex, mangaChapters, openMangaChapter]);
+
+  const finishReading = useCallback(async () => {
+    if (!book?.id) return;
+    try {
+      await axios.put(`${API_BASE}/api/books/${book.id}/progress`, {
+        progress: 100,
+        last_chapter_title: currentChapter || 'Completed'
+      });
+      toast.success('Reading marked as complete!');
+      navigate('/books');
+    } catch (err) {
+      toast.error('Failed to mark as complete');
+    }
+  }, [book?.id, currentChapter, navigate, toast]);
+
+  const hasPrevChapter = currentChapterIndex > 0;
+  const hasNextChapter = currentChapterIndex >= 0 && currentChapterIndex < mangaChapters.length - 1;
 
   const applyRenditionTheme = useCallback(() => {
     if (!renditionRef.current) return;
@@ -541,7 +793,7 @@ const Reader = () => {
       <header className={`h-12 border-b border-white/5 flex items-center justify-between px-3 md:px-5 shrink-0 relative z-50 bg-bg-dark/95 backdrop-blur-xl transition-all duration-300 ${controlsVisible ? 'translate-y-0 opacity-100' : '-translate-y-full opacity-0'}`}>
         <div className="flex items-center gap-3 min-w-0">
           <button onClick={() => navigate('/books')} className="btn-icon w-8 h-8"><ChevronLeft size={16} /></button>
-          {isEpub && (
+          {(isEpub || isManga) && (
             <button onClick={() => setShowToc((v) => !v)} className={`btn-icon w-8 h-8 ${showToc ? 'bg-primary/20 border-primary/50' : ''}`}>
               <Menu size={14} />
             </button>
@@ -554,12 +806,20 @@ const Reader = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="hidden md:flex items-center gap-2 min-w-[180px]">
-            <div className="h-1.5 flex-1 rounded-full bg-white/10 overflow-hidden">
-              <div className="h-full bg-primary shadow-[0_0_10px_var(--color-primary)]" style={{ width: `${readingProgress}%` }} />
+            <div className="hidden md:flex items-center gap-2 min-w-[180px]">
+              {isManga ? (
+                <span className="text-[10px] font-mono text-primary truncate max-w-[180px]">
+                  {currentChapter ? `Last: ${currentChapter}` : 'Last: none'}
+                </span>
+              ) : (
+                <>
+                  <div className="h-1.5 flex-1 rounded-full bg-white/10 overflow-hidden">
+                    <div className="h-full bg-primary shadow-[0_0_10px_var(--color-primary)]" style={{ width: `${readingProgress}%` }} />
+                  </div>
+                  <span className="text-[10px] font-mono text-primary w-10 text-right">{Math.round(readingProgress)}%</span>
+                </>
+              )}
             </div>
-            <span className="text-[10px] font-mono text-primary w-10 text-right">{Math.round(readingProgress)}%</span>
-          </div>
           {canHighlight && (
             <button
               onClick={() => setShowHighlightsPanel((v) => !v)}
@@ -586,7 +846,7 @@ const Reader = () => {
         </div>
       </header>
 
-      {isEpub && (
+      {(isEpub || isManga) && (
         <div
           ref={tocRef}
           className={`fixed left-0 top-12 bottom-0 w-64 z-[60] bg-surface/95 backdrop-blur-xl border-r border-white/10 transform transition-transform duration-300 overflow-hidden ${showToc ? 'translate-x-0' : '-translate-x-full'}`}
@@ -595,15 +855,33 @@ const Reader = () => {
             <h2 className="text-xs font-semibold text-white">Contents</h2>
           </div>
           <div className="overflow-y-auto h-[calc(100%-48px)] custom-scrollbar">
-            {toc.map((item, i) => (
-              <button
-                key={`${item.href}-${i}`}
-                onClick={() => goToTocItem(item.href)}
-                className="w-full text-left px-3 py-2.5 text-[11px] text-white/60 hover:text-white hover:bg-white/5 transition-colors border-b border-white/5 truncate"
-              >
-                {item.label}
-              </button>
-            ))}
+            {isManga ? (
+              loadingMangaChapters ? (
+                <p className="px-3 py-2.5 text-[11px] text-white/60">Loading chapters...</p>
+              ) : mangaChapters.length === 0 ? (
+                <p className="px-3 py-2.5 text-[11px] text-white/60">No chapters found.</p>
+              ) : (
+                mangaChapters.map((chapter, i) => (
+                  <button
+                    key={`${chapter.id}-${i}`}
+                    onClick={() => openMangaChapter(chapter)}
+                    className="w-full text-left px-3 py-2.5 text-[11px] text-white/60 hover:text-white hover:bg-white/5 transition-colors border-b border-white/5 truncate"
+                  >
+                    {(chapter.title || `Chapter ${chapter.chapter}`) + (chapter.isLocal ? ' (Local)' : '')}
+                  </button>
+                ))
+              )
+            ) : (
+              toc.map((item, i) => (
+                <button
+                  key={`${item.href}-${i}`}
+                  onClick={() => goToTocItem(item.href)}
+                  className="w-full text-left px-3 py-2.5 text-[11px] text-white/60 hover:text-white hover:bg-white/5 transition-colors border-b border-white/5 truncate"
+                >
+                  {item.label}
+                </button>
+              ))
+            )}
           </div>
         </div>
       )}
@@ -668,6 +946,62 @@ const Reader = () => {
               <button onClick={goNextPage} className="btn-icon w-9 h-9 pointer-events-auto"><ChevronRight size={14} /></button>
             </div>
           </div>
+        ) : isManga ? (
+          <div className="h-full w-full overflow-auto bg-[#080b13] custom-scrollbar px-4 py-6">
+            {mangaPages.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-white/50 text-sm">
+                {loadingMangaChapters ? 'Loading manga pages...' : 'No chapter selected. Open the chapter list.'}
+              </div>
+            ) : (
+              <div className="max-w-4xl mx-auto space-y-4 pb-24">
+                {mangaPages.map((page, idx) => (
+                  <img
+                    key={`${currentChapter || 'chapter'}-${idx}`}
+                    src={page}
+                    alt={`Manga page ${idx + 1}`}
+                    className="w-full object-contain rounded-lg border border-white/10"
+                  />
+                ))}
+                
+                {/* Chapter Navigation Footer */}
+                <div className="flex items-center justify-center gap-3 py-8 border-t border-white/10 mt-8">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); goToPrevChapter(); }}
+                    disabled={!hasPrevChapter}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-colors ${
+                      hasPrevChapter 
+                        ? 'bg-white/10 hover:bg-white/20 border-white/20' 
+                        : 'bg-white/5 border-white/10 text-white/30 cursor-not-allowed'
+                    }`}
+                  >
+                    <SkipBack size={16} />
+                    <span className="text-sm font-medium">Previous</span>
+                  </button>
+                  
+                  <button
+                    onClick={(e) => { e.stopPropagation(); finishReading(); }}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600/80 hover:bg-green-600 text-white transition-colors"
+                  >
+                    <CheckCircle size={16} />
+                    <span className="text-sm font-medium">Complete</span>
+                  </button>
+                  
+                  <button
+                    onClick={(e) => { e.stopPropagation(); goToNextChapter(); }}
+                    disabled={!hasNextChapter}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                      hasNextChapter 
+                        ? 'bg-primary/80 hover:bg-primary text-black' 
+                        : 'bg-white/5 border border-white/10 text-white/30 cursor-not-allowed'
+                    }`}
+                  >
+                    <span className="text-sm font-medium">Next</span>
+                    <SkipForward size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         ) : (
           <PdfPane
             bookUrl={bookUrl}
@@ -709,10 +1043,10 @@ const Reader = () => {
       </main>
 
       {canHighlight && showHighlightsPanel && (
-        <section className="absolute top-14 right-3 z-[90] w-72 rounded-xl border border-white/10 bg-black/70 backdrop-blur-xl p-3 space-y-3 max-h-[70vh] overflow-hidden">
+        <section className="absolute top-14 right-3 z-[90] w-80 rounded-xl border border-white/10 bg-black/70 backdrop-blur-xl p-3 space-y-3 max-h-[70vh] overflow-hidden">
           <div className="flex items-center gap-2">
             <Highlighter size={14} className="text-primary" />
-            <p className="text-[11px] font-semibold text-white uppercase tracking-wider">Highlights</p>
+            <p className="text-[11px] font-semibold text-white uppercase tracking-wider">Annotations</p>
             <button onClick={() => setShowHighlightsPanel(false)} className="ml-auto text-white/50 hover:text-white" title="Close highlights"><X size={12} /></button>
           </div>
 
@@ -740,18 +1074,13 @@ const Reader = () => {
             {highlights
               .filter((h) => h.format === (isEpub ? 'epub' : 'pdf'))
               .map((h) => (
-                <div key={h.id} className="rounded-lg border border-white/10 bg-white/5 p-2.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-[10px] text-white/70 line-clamp-3">{h.text_excerpt}</p>
-                    <button onClick={() => deleteHighlight(h.id)} className="text-white/40 hover:text-red-400">
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-sm border border-white/20" style={{ backgroundColor: h.color || '#fde047' }} />
-                    <span className="text-[9px] text-white/40">{new Date(h.created_at).toLocaleDateString()}</span>
-                  </div>
-                </div>
+                <HighlightCard 
+                  key={h.id} 
+                  highlight={h} 
+                  bookId={book.id}
+                  onDelete={() => deleteHighlight(h.id)}
+                  onUpdate={(updated) => setHighlights(prev => prev.map(item => item.id === h.id ? { ...item, ...updated } : item))}
+                />
               ))}
           </div>
         </section>

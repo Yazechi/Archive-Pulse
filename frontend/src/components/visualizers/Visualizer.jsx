@@ -763,133 +763,344 @@ const drawSemicircularVinylWrap = (ctx, payload) => {
 };
 
 // ==================== STYLE: ROUND BASE ====================
-// Full 360° radial thin bars emanating from center circle with thumbnail
+// TrapNation-inspired: mirrored curved wings, RGB time-delayed layers,
+// beat-reactive global scale, and mirrored starfield drift.
+const roundBaseState = {
+  history: [],
+  maxHistory: 6,
+  pushBars(bars) {
+    this.history.unshift([...bars]);
+    if (this.history.length > this.maxHistory) this.history.pop();
+  },
+  delayed(delay) {
+    if (!this.history.length) return null;
+    return this.history[Math.min(delay, this.history.length - 1)];
+  },
+};
+
+const roundBaseStarfield = {
+  stars: [],
+  initialized: false,
+  dist: 256,
+  currentSpeed: 1,
+  targetSpeed: 1,
+  init(count = 420) {
+    if (this.initialized) return;
+    for (let i = 0; i < count; i += 1) {
+      this.stars.push({
+        x: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
+        y: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
+        z: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
+        a: 0.2 + Math.random() * 0.45,
+      });
+    }
+    this.initialized = true;
+  },
+  update() {
+    this.currentSpeed += (this.targetSpeed - this.currentSpeed) * 0.1;
+    for (const s of this.stars) {
+      s.z -= this.currentSpeed;
+      s.x += 0.5 * Math.sin(s.z / 256);
+      s.y += 0.5 * Math.sin(s.z / 256);
+      if (s.z < -this.dist) {
+        s.z = this.dist;
+        s.x = -1 * Math.random() * this.dist;
+        s.y = ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist);
+      }
+    }
+  },
+  draw(ctx, width, height) {
+    for (const s of this.stars) {
+      if (s.z <= 0) continue;
+      const xp = width / 2 + (s.x * this.dist) / s.z;
+      const yp = height / 2 + (s.y * this.dist) / s.z;
+      if (xp < 0 || xp > width || yp < 0 || yp > height) continue;
+      const size = Math.max(0.5, 5 * (1 - s.z / this.dist));
+      ctx.fillStyle = `rgba(255,255,255,${s.a})`;
+      ctx.beginPath();
+      ctx.arc(xp, yp, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(width - xp, yp, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  },
+};
+
+const roundBaseBeat = {
+  previousScale: 1,
+  targetScale: 1,
+  currentScale: 1,
+  previousStarSpeed: 1,
+  targetStarSpeed: 1,
+  direction: 0,
+  falloff: 0,
+  lastTS: 0,
+  lowEma: 0,
+  beatScale: 1.32,
+  increaseDuration: 55,
+  stayDuration: 180,
+  decreaseDuration: 120,
+  update(deltaMS, lowBand) {
+    this.lowEma = this.lowEma * 0.9 + lowBand * 0.1;
+    const beatTriggered = lowBand > this.lowEma * 1.18 + 8;
+    if (beatTriggered) {
+      if (this.direction === 0 || this.direction === -1) {
+        this.direction = 1;
+        this.previousScale = this.currentScale;
+        this.targetScale = this.beatScale;
+        this.previousStarSpeed = roundBaseStarfield.currentSpeed;
+        this.targetStarSpeed = 5;
+        this.falloff = this.increaseDuration;
+      } else if (this.direction === 2) {
+        this.falloff = this.stayDuration;
+      }
+    }
+    if (this.falloff > 0 && this.direction !== 0) {
+      this.falloff -= deltaMS;
+      if (this.falloff <= 0) {
+        if (this.direction === 1) {
+          this.direction = 2;
+          this.previousScale = this.currentScale;
+          this.targetScale = this.currentScale;
+          this.previousStarSpeed = roundBaseStarfield.currentSpeed;
+          this.targetStarSpeed = roundBaseStarfield.currentSpeed;
+          this.falloff = this.stayDuration;
+        } else if (this.direction === 2) {
+          this.direction = -1;
+          this.previousScale = this.currentScale;
+          this.targetScale = 1;
+          this.previousStarSpeed = roundBaseStarfield.currentSpeed;
+          this.targetStarSpeed = 1;
+          this.falloff = this.decreaseDuration;
+        } else {
+          this.direction = 0;
+          this.previousScale = 1;
+          this.targetScale = 1;
+          this.previousStarSpeed = 1;
+          this.targetStarSpeed = 1;
+          this.falloff = 0;
+        }
+      }
+    }
+    if (this.falloff > 0) {
+      const duration = this.direction === 2 ? this.stayDuration
+        : this.direction === 1 ? this.increaseDuration
+          : this.decreaseDuration;
+      const t = Math.max(0, Math.min(1, (duration - this.falloff) / duration));
+      const smooth = t * t * (3 - 2 * t);
+      this.currentScale = this.previousScale + (this.targetScale - this.previousScale) * smooth;
+      roundBaseStarfield.targetSpeed = this.previousStarSpeed + (this.targetStarSpeed - this.previousStarSpeed) * smooth;
+    }
+    return this.currentScale;
+  },
+};
+
+// Cardinal spline curve drawing (like the reference's ctx.curve)
+const drawCardinalSpline = (ctx, points, tension = 0.5, closed = false, append = false) => {
+  if (points.length < 4) return;
+  
+  if (!append) {
+    ctx.beginPath();
+  }
+  
+  const getPoint = (i) => {
+    if (closed) {
+      const idx = ((i % (points.length / 2)) + points.length / 2) % (points.length / 2);
+      return { x: points[idx * 2], y: points[idx * 2 + 1] };
+    }
+    const idx = Math.max(0, Math.min(points.length / 2 - 1, i));
+    return { x: points[idx * 2], y: points[idx * 2 + 1] };
+  };
+  
+  const numPoints = points.length / 2;
+  
+  for (let i = 0; i < numPoints - (closed ? 0 : 1); i++) {
+    const p0 = getPoint(i - 1);
+    const p1 = getPoint(i);
+    const p2 = getPoint(i + 1);
+    const p3 = getPoint(i + 2);
+    
+    if (i === 0) {
+      if (append) {
+        ctx.lineTo(p1.x, p1.y);
+      } else {
+      ctx.moveTo(p1.x, p1.y);
+      }
+    }
+    
+    const t1x = (p2.x - p0.x) * tension;
+    const t1y = (p2.y - p0.y) * tension;
+    const t2x = (p3.x - p1.x) * tension;
+    const t2y = (p3.y - p1.y) * tension;
+    
+    const steps = 12;
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      
+      const h1 = 2 * t3 - 3 * t2 + 1;
+      const h2 = -2 * t3 + 3 * t2;
+      const h3 = t3 - 2 * t2 + t;
+      const h4 = t3 - t2;
+      
+      const x = h1 * p1.x + h2 * p2.x + h3 * t1x + h4 * t2x;
+      const y = h1 * p1.y + h2 * p2.y + h3 * t1y + h4 * t2y;
+      
+      ctx.lineTo(x, y);
+    }
+  }
+};
+
+const normalizeRoundBaseAmp = (value, maxLen, amplitudeMultiplier = 1) => {
+  const v = Math.max(0, Math.min(255, Number(value) || 0)) / 255;
+  return Math.pow(v, 0.75) * maxLen * amplitudeMultiplier;
+};
+
 const drawRoundBase = (ctx, payload) => {
   const {
-    width, height, bars, thumb, glowIntensity, energy,
-    barHeightScale, tick, vinylScale, vinylSpinSpeed, barWidthScale,
-    primaryColor, secondaryColor, bloomStrength, barOpacityMin, barOpacityMax,
-    beatPulse,
+    width, height, bars, thumb, glowIntensity,
+    barHeightScale, vinylScale, primaryColor,
   } = payload;
 
-  const centerX = width / 2;
-  const centerY = height * 0.5;
-  const base = Math.min(width, height);
-  const baseRadius = base * 0.13 * vinylScale;
-  const pulse = 1 + (beatPulse || 0) * 0.15;
-  
-  // Mirror bars for perfect symmetry (Trap Nation signature look)
-  const halfCount = Math.min(64, Math.floor(bars.length / 2));
-  const count = halfCount * 2;
-  const maxLen = height * 0.32 * barHeightScale * pulse;
-  const spin = tick * 0.0015 * vinylSpinSpeed;
+  roundBaseStarfield.init(400);
+  roundBaseState.pushBars(bars);
 
-  // Draw ambient outer glow
-  const ambientGlow = ctx.createRadialGradient(centerX, centerY, baseRadius, centerX, centerY, base * 0.55);
-  ambientGlow.addColorStop(0, toRgba(primaryColor, 0.06));
-  ambientGlow.addColorStop(0.5, toRgba(secondaryColor, 0.02));
-  ambientGlow.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = ambientGlow;
+  const now = performance.now();
+  const deltaMS = roundBaseBeat.lastTS ? now - roundBaseBeat.lastTS : 16.67;
+  roundBaseBeat.lastTS = now;
+
+  const lowBand = ((bars[0] ?? 0) + (bars[1] ?? 0) + (bars[2] ?? 0) + (bars[3] ?? 0)) / 4;
+  const scaleFactor = roundBaseBeat.update(deltaMS, lowBand);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(0, 0, width, height);
 
-  // Draw outer decorative rings (subtle)
-  for (let ring = 0; ring < 3; ring += 1) {
-    const ringR = baseRadius + base * (0.28 + ring * 0.08);
-    ctx.strokeStyle = toRgba(primaryColor, 0.04 - ring * 0.01);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, ringR, 0, Math.PI * 2);
-    ctx.stroke();
-  }
+  roundBaseStarfield.update();
+  roundBaseStarfield.draw(ctx, width, height);
 
-  // Draw radial bars emanating outward (Trap Nation style - mirrored)
-  const innerRadius = baseRadius + 6;
-  
-  for (let i = 0; i < count; i += 1) {
-    // Mirror: left half and right half show same frequency data
-    const mirrorIdx = i < halfCount ? i : count - 1 - i;
-    const amp = (bars[mirrorIdx] || 0) / 255;
-    const reactive = Math.pow(amp, 0.7);
-    
-    const t = i / count;
-    const angle = t * Math.PI * 2 - Math.PI / 2; // Start from top
-    
-    // Bar length based on amplitude with minimum visibility
-    const ext = Math.max(6, reactive * maxLen);
-    
-    const x1 = centerX + Math.cos(angle) * innerRadius;
-    const y1 = centerY + Math.sin(angle) * innerRadius;
-    const x2 = centerX + Math.cos(angle) * (innerRadius + ext);
-    const y2 = centerY + Math.sin(angle) * (innerRadius + ext);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const base = Math.min(width, height);
+  const radius = base * 0.13 * vinylScale;
+  const maxLen = Math.max(10, base * 0.26 * barHeightScale);
 
-    const alpha = barOpacityMin + reactive * (barOpacityMax - barOpacityMin);
+  const startFreq = 0;
+  const endFreq = Math.min(17, bars.length - 1);
+  const freqCount = endFreq - startFreq + 1;
+  const degToRad = (deg) => (deg * Math.PI) / 180;
+  const angle = 180 / (2 + freqCount);
+
+  const generateCurvePoints = (sourceBars, amplitudeMultiplier) => {
+    const points = [];
+    const mirrorPoints = [];
+
+    let idx = 0;
+    const x0 = radius * Math.cos(idx * degToRad(angle));
+    const y0 = radius * Math.sin(idx * degToRad(angle));
+    points.push(x0, y0);
+    mirrorPoints.push(x0, -y0);
+    idx++;
     
-    // Gradient: base -> primary -> white tip (NCS/Trap Nation signature)
-    const grad = ctx.createLinearGradient(x1, y1, x2, y2);
-    grad.addColorStop(0, toRgba(secondaryColor, alpha * 0.6));
-    grad.addColorStop(0.3, toRgba(primaryColor, alpha));
-    grad.addColorStop(0.8, toRgba(primaryColor, alpha * 1.1));
-    grad.addColorStop(1, toRgba('#ffffff', Math.min(1, alpha + 0.2)));
-    
-    ctx.save();
-    ctx.strokeStyle = grad;
-    ctx.lineCap = 'round';
-    ctx.lineWidth = Math.max(2, (2.2 + reactive * 2) * barWidthScale);
-    ctx.shadowBlur = (8 + reactive * 18) * glowIntensity * (0.7 + bloomStrength * 0.5);
-    ctx.shadowColor = toRgba(primaryColor, 0.65 + reactive * 0.3);
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
-    ctx.restore();
-  }
-  
-  // Draw inner glowing ring around center
+    for (let i = startFreq; i <= endFreq; i++) {
+      const rawValue = sourceBars?.[i] ?? 0;
+      const value = normalizeRoundBaseAmp(rawValue, maxLen, amplitudeMultiplier);
+      const xW = (radius + value) * Math.cos(idx * degToRad(angle));
+      const yW = (radius + value) * Math.sin(idx * degToRad(angle));
+      points.push(xW, yW);
+      mirrorPoints.push(xW, -yW);
+      idx++;
+    }
+
+    const xF = radius * Math.cos(idx * degToRad(angle));
+    const yF = radius * Math.sin(idx * degToRad(angle));
+    points.push(xF, yF);
+    mirrorPoints.push(xF, -yF);
+
+    return { points, mirrorPoints };
+  };
+
+  const whiteBars = roundBaseState.delayed(0) ?? bars;
+  const redBars = roundBaseState.delayed(1) ?? whiteBars;
+  const blueBars = roundBaseState.delayed(2) ?? whiteBars;
+  const greenBars = roundBaseState.delayed(3) ?? whiteBars;
+
   ctx.save();
-  ctx.strokeStyle = toRgba(primaryColor, 0.5);
-  ctx.lineWidth = 2.5;
-  ctx.shadowBlur = 15 * glowIntensity;
-  ctx.shadowColor = toRgba(primaryColor, 0.6);
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, innerRadius - 3, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.translate(centerX, centerY);
+  ctx.scale(scaleFactor, scaleFactor);
+
+  ctx.save();
+  ctx.rotate(degToRad(-90));
+
+  if (scaleFactor > 1) {
+    const glowAlpha = Math.min(0.8, 0.35 * (scaleFactor - 1) * 3.2);
+    ctx.shadowColor = `rgba(255, 255, 255, ${glowAlpha})`;
+    ctx.shadowBlur = 5 * ((scaleFactor * 100) - 100) * glowIntensity;
+  }
+
+  const greenData = generateCurvePoints(greenBars, 1.7);
+  const blueData = generateCurvePoints(blueBars, 1.45);
+  const redData = generateCurvePoints(redBars, 1.2);
+  const whiteData = generateCurvePoints(whiteBars, 1.0);
+
+  if (greenData.points.length > 0) {
+    ctx.fillStyle = '#00ff00';
+    drawCardinalSpline(ctx, greenData.points, 0.5, false, false);
+    drawCardinalSpline(ctx, greenData.mirrorPoints, 0.5, false, true);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  if (blueData.points.length > 0) {
+    ctx.fillStyle = '#0000ff';
+    drawCardinalSpline(ctx, blueData.points, 0.5, false, false);
+    drawCardinalSpline(ctx, blueData.mirrorPoints, 0.5, false, true);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  if (redData.points.length > 0) {
+    ctx.fillStyle = '#ff0000';
+    drawCardinalSpline(ctx, redData.points, 0.5, false, false);
+    drawCardinalSpline(ctx, redData.mirrorPoints, 0.5, false, true);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  if (whiteData.points.length > 0) {
+    ctx.fillStyle = '#ffffff';
+    drawCardinalSpline(ctx, whiteData.points, 0.5, false, false);
+    drawCardinalSpline(ctx, whiteData.mirrorPoints, 0.5, false, true);
+    ctx.closePath();
+    ctx.fill();
+  }
   ctx.restore();
 
-  // Draw center circle with thumbnail
-  ctx.save();
   ctx.beginPath();
-  ctx.arc(centerX, centerY, baseRadius, 0, Math.PI * 2);
-  ctx.closePath();
-  
-  // Dark base circle with gradient
-  const circleGrad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, baseRadius);
-  circleGrad.addColorStop(0, '#1e1e2e');
-  circleGrad.addColorStop(0.7, '#151520');
-  circleGrad.addColorStop(1, '#0a0a12');
-  ctx.fillStyle = circleGrad;
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
   ctx.fill();
-  
-  // Thumbnail inside circle (spinning)
+
   if (thumb) {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(centerX, centerY, baseRadius * 0.88, 0, Math.PI * 2);
+    ctx.arc(0, 0, radius * 0.92, 0, Math.PI * 2);
     ctx.clip();
-    ctx.translate(centerX, centerY);
-    ctx.rotate(spin);
-    const thumbSize = baseRadius * 1.76;
+    const thumbSize = radius * 1.84;
     drawImageCover(ctx, thumb, -thumbSize / 2, -thumbSize / 2, thumbSize, thumbSize);
     ctx.restore();
   }
-  
-  // Circle border with glow
-  ctx.strokeStyle = toRgba(primaryColor, 0.7);
-  ctx.lineWidth = 2.5;
-  ctx.shadowBlur = 14 * glowIntensity;
-  ctx.shadowColor = toRgba(primaryColor, 0.6);
+
+  ctx.strokeStyle = toRgba(primaryColor, 0.4 * scaleFactor);
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 10 * glowIntensity * scaleFactor;
+  ctx.shadowColor = toRgba(primaryColor, 0.5);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
   ctx.stroke();
+
   ctx.restore();
-  
   ctx.shadowBlur = 0;
 };
 

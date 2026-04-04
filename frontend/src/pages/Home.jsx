@@ -132,7 +132,11 @@ const Home = () => {
 
           <div className="section-card grid grid-cols-2 gap-4 md:gap-5">
             {recentBooks.map((book) => (
-              <div key={book.id} onClick={() => navigate('/reader', { state: { book } })} className="group cursor-pointer space-y-3 tap-press">
+              <div
+                key={book.id}
+                onClick={() => navigate(book.type === 'manga' ? '/manga-chapters' : '/reader', { state: { book } })}
+                className="group cursor-pointer space-y-3 tap-press"
+              >
                 <div className="aspect-[3/4] rounded-2xl border border-border bg-zinc-900 relative overflow-hidden group-hover:border-primary/20 transition-all duration-500">
                   <img src={book.thumbnail_url} className="w-full h-full object-cover grayscale opacity-45 group-hover:opacity-100 group-hover:grayscale-0 transition-all duration-700" alt="" />
                   <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />

@@ -7,24 +7,34 @@ import { Search as SearchIcon, Play, Plus, BookOpen, ExternalLink, Activity } fr
 const Search = () => {
   const [query, setQuery] = useState('');
   const [type, setType] = useState('music');
+  const [provider, setProvider] = useState('all');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const { playTrack, toggleMainPlayer } = useMusic();
   const toast = useToast();
 
-  const fetchResults = async (searchQuery, searchType) => {
+  const fetchResults = async (searchQuery, searchType, selectedProvider = 'all') => {
     setLoading(true);
     setError('');
     try {
       const endpoint = searchType === 'music' ? '/api/music/search' : '/api/books/search';
       const q = searchQuery || (searchType === 'music' ? 'Top Hits' : 'Trending');
-      const response = await axios.get(`http://127.0.0.1:5000${endpoint}?q=${encodeURIComponent(q)}&type=${searchType}`);
+      const response = await axios.get(`http://127.0.0.1:5000${endpoint}?q=${encodeURIComponent(q)}&type=${searchType}&provider=${selectedProvider}`);
       setResults(response.data);
     } catch (err) { setError(`Registry Connection Error: ${err.message}`); } finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchResults(query, type); }, [type]);
+  useEffect(() => {
+    const defaultProvider =
+      type === 'books'
+        ? (localStorage.getItem('pref-provider-books') || 'all')
+        : type === 'manga'
+          ? (localStorage.getItem('pref-provider-manga') || 'mangadex')
+          : 'all';
+    setProvider(defaultProvider);
+    fetchResults(query, type, defaultProvider);
+  }, [type]);
 
   const addToCollection = async (item) => {
     try {
@@ -59,9 +69,34 @@ const Search = () => {
             </button>
           ))}
         </div>
+        {type !== 'music' && (
+          <div className="w-full sm:w-fit flex bg-white/5 border border-white/10 p-1.5 rounded-2xl">
+            {(type === 'books'
+              ? [
+                  { id: 'all', label: 'All' },
+                  { id: 'gutenberg', label: 'Gutenberg' },
+                  { id: 'openlibrary', label: 'OpenLibrary' },
+                ]
+              : [
+                  { id: 'all', label: 'All' },
+                  { id: 'mangadex', label: 'MangaDex' },
+                  { id: 'myanimelist', label: 'MyAnimeList' },
+                ]
+            ).map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => { setProvider(p.id); fetchResults(query, type, p.id); }}
+                className={`px-4 py-2 rounded-xl font-semibold text-[10px] uppercase tracking-wider transition-all ${provider === p.id ? 'bg-primary text-black' : 'text-white/40 hover:text-white'}`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
 
-      <form onSubmit={(e) => { e.preventDefault(); fetchResults(query, type); }} className="relative group section-card">
+      <form onSubmit={(e) => { e.preventDefault(); fetchResults(query, type, provider); }} className="relative group section-card">
         <input
           type="text"
           value={query}

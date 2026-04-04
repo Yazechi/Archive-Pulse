@@ -9,9 +9,15 @@ const Music = lazy(() => import('./pages/Music'));
 const Playlists = lazy(() => import('./pages/Playlists'));
 const Search = lazy(() => import('./pages/Search'));
 const Books = lazy(() => import('./pages/Books'));
+const MangaChapters = lazy(() => import('./pages/MangaChapters'));
 const Reader = lazy(() => import('./pages/Reader'));
 const Upload = lazy(() => import('./pages/Upload'));
 const Profile = lazy(() => import('./pages/Profile'));
+const Videos = lazy(() => import('./pages/Videos'));
+const VideoPlayer = lazy(() => import('./pages/VideoPlayer'));
+const Activity = lazy(() => import('./pages/Activity'));
+const Stats = lazy(() => import('./pages/Stats'));
+const Downloads = lazy(() => import('./pages/Downloads'));
 
 function AppContent() {
   const { isMainPlayerExpanded, toggleMainPlayer } = useMusic();
@@ -44,6 +50,8 @@ function AppContent() {
   }, [location.pathname, isMainPlayerExpanded, toggleMainPlayer]);
 
   const isReaderPage = location.pathname.startsWith('/reader');
+  const isVideoPlayerPage = location.pathname.startsWith('/video-player');
+  const isFullscreenPage = isReaderPage || isVideoPlayerPage;
 
   return (
     <div className="app-shell flex min-h-screen bg-bg-dark text-text-primary font-body selection:bg-primary/20 overflow-hidden">
@@ -53,14 +61,14 @@ function AppContent() {
         style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, white 1px, transparent 0)', backgroundSize: '36px 36px' }}
       />
 
-      {!isReaderPage && <Sidebar />}
+      {!isFullscreenPage && <Sidebar />}
       
       <main 
         className={`flex-1 transition-all duration-300 z-10 relative overflow-y-auto custom-scrollbar ${
-          isReaderPage ? 'ml-0' : isMobile ? 'ml-0' : isSidebarCollapsed ? 'ml-20' : 'ml-64'
+          isFullscreenPage ? 'ml-0' : isMobile ? 'ml-0' : isSidebarCollapsed ? 'ml-20' : 'ml-64'
         }`}
       >
-        <div className="min-h-screen pt-8 md:pt-12 px-4 md:px-8 lg:px-12 xl:px-16 pb-44 md:pb-32">
+        <div className={isVideoPlayerPage ? '' : 'min-h-screen pt-8 md:pt-12 px-4 md:px-8 lg:px-12 xl:px-16 pb-44 md:pb-32'}>
           <Suspense fallback={<LoadingState />}>
             <Routes>
               <Route path="/" element={<Home />} />
@@ -68,15 +76,21 @@ function AppContent() {
               <Route path="/playlists" element={<Playlists />} />
               <Route path="/search" element={<Search />} />
               <Route path="/books" element={<Books />} />
+              <Route path="/manga-chapters" element={<MangaChapters />} />
               <Route path="/reader" element={<Reader />} />
               <Route path="/upload" element={<Upload />} />
               <Route path="/profile" element={<Profile />} />
+              <Route path="/videos" element={<Videos />} />
+              <Route path="/video-player" element={<VideoPlayer />} />
+              <Route path="/activity" element={<Activity />} />
+              <Route path="/stats" element={<Stats />} />
+              <Route path="/downloads" element={<Downloads />} />
             </Routes>
           </Suspense>
         </div>
       </main>
 
-      <MusicPlayer isReaderPage={isReaderPage} isSidebarCollapsed={isSidebarCollapsed} isMobile={isMobile} />
+      {!isVideoPlayerPage && <MusicPlayer isReaderPage={isReaderPage} isSidebarCollapsed={isSidebarCollapsed} isMobile={isMobile} />}
     </div>
   );
 }

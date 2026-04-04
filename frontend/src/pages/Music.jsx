@@ -4,6 +4,7 @@ import { useMusic } from '../context/useMusic';
 import { useToast } from '../context/ToastContext';
 import { useNavigate } from 'react-router-dom';
 import { Trash2, Plus, ListPlus, RefreshCcw, Shuffle, CheckSquare, Square, X, Play } from 'lucide-react';
+import { FavoriteButton, useFavorites } from '../components/FavoriteButton';
 
 const Music = () => {
   const [songs, setSongs] = useState([]);
@@ -20,6 +21,7 @@ const Music = () => {
   const navigate = useNavigate();
   const listRef = useRef(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const { fetchFavorites, isFavorite, setFavoriteState } = useFavorites('song');
   const rowHeight = 80;
 
   const fetchSongs = async () => {
@@ -37,7 +39,11 @@ const Music = () => {
     } catch (err) { console.error(err); }
   };
 
-  useEffect(() => { fetchSongs(); fetchPlaylists(); }, []);
+  useEffect(() => {
+    fetchSongs();
+    fetchPlaylists();
+    fetchFavorites();
+  }, []);
 
   const createPlaylist = async () => {
     if (!newPlaylistName) return;
@@ -170,16 +176,25 @@ const Music = () => {
                   <div className="col-span-3 md:col-span-2 flex items-center justify-end gap-1 md:gap-4">
                     <span className="font-mono text-[10px] text-zinc-600">{song.duration || '00:00'}</span>
                     {!isBatchMode && (
-                      <div className="flex items-center opacity-0 group-hover:opacity-100 transition-all">
+                      <div className="flex items-center gap-1 md:gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-all">
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <FavoriteButton
+                            contentType="song"
+                            contentId={song.id}
+                            isFavorite={isFavorite(song.id)}
+                            onToggle={(next) => setFavoriteState(song.id, next)}
+                            size="sm"
+                          />
+                        </div>
                         <button 
                           onClick={(e) => { e.stopPropagation(); setSelectedSong(song); setShowPlaylistModal(true); }} 
-                          className="p-2 text-zinc-600 hover:text-primary transition-all"
+                          className="p-2 rounded-md text-zinc-600 hover:text-primary hover:bg-white/5 transition-all"
                         >
                           <Plus size={16} />
                         </button>
                         <button 
                           onClick={(e) => { e.stopPropagation(); deleteSong(song.id); }} 
-                          className="p-2 text-zinc-600 hover:text-red-400 transition-all"
+                          className="p-2 rounded-md text-zinc-600 hover:text-red-400 hover:bg-white/5 transition-all"
                         >
                           <Trash2 size={16} />
                         </button>

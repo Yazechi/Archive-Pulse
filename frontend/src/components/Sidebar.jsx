@@ -31,8 +31,12 @@ const Sidebar = () => {
     { name: 'Music Library', icon: 'library_music', path: '/music' },
     { name: 'Collections', icon: 'auto_awesome_motion', path: '/playlists' },
     { name: 'Literature', icon: 'menu_book', path: '/books' },
+    { name: 'Videos', icon: 'movie', path: '/videos' },
     { name: 'Discovery', icon: 'explore', path: '/search' },
     { name: 'Data Entry', icon: 'upload_file', path: '/upload' },
+    { name: 'Downloads', icon: 'download', path: '/downloads' },
+    { name: 'Activity', icon: 'history', path: '/activity' },
+    { name: 'Stats', icon: 'analytics', path: '/stats' },
   ];
 
   if (location.pathname === '/reader') return null;
