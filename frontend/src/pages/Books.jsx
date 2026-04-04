@@ -26,6 +26,7 @@ const Books = () => {
   const [annotations, setAnnotations] = useState([]);
   const [annotationCounts, setAnnotationCounts] = useState({});
   const [showAnnotationsModal, setShowAnnotationsModal] = useState(false);
+  const [readingEstimates, setReadingEstimates] = useState({});
   const { fetchFavorites, isFavorite, setFavoriteState } = useFavorites('book');
   const navigate = useNavigate();
   const toast = useToast();
@@ -33,12 +34,18 @@ const Books = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [bRes, sRes] = await Promise.all([
+      const [bRes, sRes, estimateRes] = await Promise.all([
         axios.get(`${API_BASE}/api/books?t=${Date.now()}`),
-        axios.get(`${API_BASE}/api/series?t=${Date.now()}`)
+        axios.get(`${API_BASE}/api/series?t=${Date.now()}`),
+        axios.get(`${API_BASE}/api/stats/reading-estimates`).catch(() => ({ data: { estimates: [] } })),
       ]);
       setBooks(bRes.data);
       setSeries(sRes.data);
+      const estimateMap = (estimateRes.data?.estimates || []).reduce((acc, item) => {
+        acc[item.id] = item;
+        return acc;
+      }, {});
+      setReadingEstimates(estimateMap);
       const annoRes = await axios.get(`${API_BASE}/api/annotations`);
       const ann = Array.isArray(annoRes.data) ? annoRes.data : [];
       setAnnotations(ann);
@@ -351,6 +358,11 @@ const Books = () => {
                         : `${Math.round(normalizeProgress(book.progress))}%`}
                     </span>
                   </div>
+                  {book.type !== 'manga' && readingEstimates[book.id]?.remaining_minutes > 0 && (
+                    <p className="text-[9px] text-cyan-300/90 uppercase tracking-widest">
+                      ~{readingEstimates[book.id].remaining_minutes}m remaining
+                    </p>
+                  )}
                   <div className="flex flex-wrap gap-1">
                     {(bookTags[book.id] || []).slice(0, 3).map((tag) => (
                       <TagBadge key={tag.id} tag={tag} size="xs" />

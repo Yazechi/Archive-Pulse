@@ -21,6 +21,7 @@ import {
   Edit3,
   MessageSquare,
   CheckCircle,
+  Bookmark,
 } from 'lucide-react';
 import PdfPane from '../components/reader/PdfPane';
 import { useMusic } from '../context/useMusic';
@@ -235,6 +236,9 @@ const Reader = () => {
   const [loadingMangaChapters, setLoadingMangaChapters] = useState(false);
   const [mangaPages, setMangaPages] = useState([]);
   const [currentChapterIndex, setCurrentChapterIndex] = useState(-1);
+  const [bookmarks, setBookmarks] = useState([]);
+  const [showBookmarksPanel, setShowBookmarksPanel] = useState(false);
+  const [readingEstimate, setReadingEstimate] = useState(null);
 
   const readerRef = useRef(null);
   const renditionRef = useRef(null);
@@ -331,14 +335,18 @@ const Reader = () => {
     let mounted = true;
     const loadReaderData = async () => {
       try {
-        const [bookRes, highlightRes] = await Promise.all([
+        const [bookRes, highlightRes, bookmarkRes, estimateRes] = await Promise.all([
           axios.get(`${API_BASE}/api/books/by-id/${initialBook.id}`),
           axios.get(`${API_BASE}/api/books/${initialBook.id}/highlights`),
+          axios.get(`${API_BASE}/api/books/${initialBook.id}/bookmarks`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/books/${initialBook.id}/reading-estimate`).catch(() => ({ data: { available: false } })),
         ]);
         if (!mounted) return;
         const freshBook = bookRes.data;
         setBook(freshBook);
         setHighlights(Array.isArray(highlightRes.data) ? highlightRes.data : []);
+        setBookmarks(Array.isArray(bookmarkRes.data) ? bookmarkRes.data : []);
+        setReadingEstimate(estimateRes.data?.available ? estimateRes.data : null);
         setReadingProgress(clampProgress(freshBook.progress));
         if (freshBook.last_cfi) setEpubLocation(freshBook.last_cfi);
         if (freshBook.last_page && freshBook.type !== 'manga') {
@@ -354,6 +362,57 @@ const Reader = () => {
     loadReaderData();
     return () => { mounted = false; };
   }, [initialBook?.id]);
+
+  const addBookmark = useCallback(async () => {
+    if (!book?.id) return;
+    try {
+      const payload = isManga
+        ? {
+            bookmark_type: 'manga',
+            chapter_id: mangaChapters[currentChapterIndex]?.id || null,
+            chapter_title: currentChapter || null,
+            locator: null,
+            note: currentChapter || 'Chapter bookmark',
+          }
+        : isEpub
+          ? {
+              bookmark_type: 'epub',
+              chapter_id: null,
+              chapter_title: currentChapter || null,
+              locator: epubLocation || null,
+              note: currentChapter || 'EPUB location',
+            }
+          : {
+              bookmark_type: 'pdf',
+              chapter_id: null,
+              chapter_title: `Page ${pageNumber}`,
+              locator: `page:${pageNumber}`,
+              note: `Page ${pageNumber}`,
+            };
+      if (!payload.chapter_id && !payload.locator) {
+        toast.warning('Move to a chapter or page before bookmarking');
+        return;
+      }
+      await axios.post(`${API_BASE}/api/books/${book.id}/bookmarks`, payload);
+      const refreshed = await axios.get(`${API_BASE}/api/books/${book.id}/bookmarks`);
+      setBookmarks(Array.isArray(refreshed.data) ? refreshed.data : []);
+      toast.success('Bookmark saved');
+    } catch (err) {
+      console.error('Failed to save bookmark', err);
+      toast.error('Failed to save bookmark');
+    }
+  }, [book?.id, currentChapter, currentChapterIndex, epubLocation, isEpub, isManga, mangaChapters, pageNumber, toast]);
+
+  const removeBookmark = useCallback(async (bookmarkId) => {
+    if (!book?.id) return;
+    try {
+      await axios.delete(`${API_BASE}/api/books/${book.id}/bookmarks/${bookmarkId}`);
+      setBookmarks((prev) => prev.filter((item) => item.id !== bookmarkId));
+    } catch (err) {
+      console.error('Failed to remove bookmark', err);
+      toast.error('Failed to remove bookmark');
+    }
+  }, [book?.id, toast]);
 
   useEffect(() => {
     if (!isManga || !book?.source_url) return;
@@ -659,6 +718,23 @@ const Reader = () => {
     setShowToc(false);
   }, []);
 
+  const jumpToBookmark = useCallback(async (bookmark) => {
+    if (!bookmark) return;
+    if (bookmark.bookmark_type === 'manga' && bookmark.chapter_id) {
+      const target = mangaChapters.find((chapter) => chapter.id === bookmark.chapter_id);
+      if (target) await openMangaChapter(target);
+      return;
+    }
+    if (bookmark.bookmark_type === 'epub' && bookmark.locator && renditionRef.current) {
+      renditionRef.current.display(bookmark.locator);
+      return;
+    }
+    if (bookmark.bookmark_type === 'pdf' && bookmark.locator?.startsWith('page:')) {
+      const page = Number(bookmark.locator.replace('page:', ''));
+      if (Number.isFinite(page) && page > 0) setPageNumber(Math.floor(page));
+    }
+  }, [mangaChapters, openMangaChapter]);
+
   const goPrevPage = useCallback(() => {
     if (isEpub && renditionRef.current) {
       renditionRef.current.prev();
@@ -819,7 +895,26 @@ const Reader = () => {
                   <span className="text-[10px] font-mono text-primary w-10 text-right">{Math.round(readingProgress)}%</span>
                 </>
               )}
+              {!isManga && readingEstimate?.remaining_minutes > 0 && (
+                <span className="text-[10px] font-mono text-cyan-300/90 whitespace-nowrap">
+                  ~{readingEstimate.remaining_minutes}m left
+                </span>
+              )}
             </div>
+          <button
+            onClick={addBookmark}
+            className="btn-icon w-8 h-8"
+            title="Add bookmark"
+          >
+            <Bookmark size={14} />
+          </button>
+          <button
+            onClick={() => setShowBookmarksPanel((v) => !v)}
+            className={`btn-icon w-8 h-8 ${showBookmarksPanel ? 'bg-primary/20 border-primary/50 text-primary' : ''}`}
+            title="Bookmarks"
+          >
+            <Bookmark size={14} />
+          </button>
           {canHighlight && (
             <button
               onClick={() => setShowHighlightsPanel((v) => !v)}
@@ -1094,6 +1189,31 @@ const Reader = () => {
         <div className="absolute inset-0 z-[95] grid place-items-center pointer-events-none">
           <p className="text-xs text-primary">Loading EPUB...</p>
         </div>
+      )}
+
+      {showBookmarksPanel && (
+        <section className="absolute top-14 right-3 z-[90] w-80 rounded-xl border border-white/10 bg-black/70 backdrop-blur-xl p-3 space-y-3 max-h-[70vh] overflow-hidden">
+          <div className="flex items-center gap-2">
+            <Bookmark size={14} className="text-primary" />
+            <p className="text-[11px] font-semibold text-white uppercase tracking-wider">Chapter Bookmarks</p>
+            <button onClick={addBookmark} className="ml-auto text-primary hover:text-white text-[10px]">Add</button>
+          </div>
+          <div className="space-y-2 overflow-y-auto max-h-[58vh] custom-scrollbar pr-1">
+            {bookmarks.length === 0 ? (
+              <p className="text-[11px] text-white/60">No bookmarks yet.</p>
+            ) : bookmarks.map((item) => (
+              <div key={item.id} className="rounded-lg border border-white/10 bg-white/5 p-2.5">
+                <button onClick={() => jumpToBookmark(item)} className="text-left w-full">
+                  <p className="text-[11px] text-white truncate">{item.chapter_title || item.note || item.locator || item.chapter_id}</p>
+                  <p className="text-[9px] text-white/45 uppercase tracking-wider">{item.bookmark_type}</p>
+                </button>
+                <div className="mt-2 flex justify-end">
+                  <button onClick={() => removeBookmark(item.id)} className="text-[9px] text-red-300 hover:text-red-200">Remove</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
     </div>
   );

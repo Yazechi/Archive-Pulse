@@ -49,6 +49,7 @@ const DEFAULT_VISUALIZER_SETTINGS = {
   miniVisualizerGlow: 0.7,
   miniVisualizerMirror: true,
   eqGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  eqPreset: 'flat',
   playbackRate: 1,
 };
 
@@ -105,6 +106,7 @@ const sanitizeVisualizerSettings = (settings) => ({
   miniVisualizerBarCount: Math.round(clampNumber(settings.miniVisualizerBarCount, 12, 56, DEFAULT_VISUALIZER_SETTINGS.miniVisualizerBarCount)),
   miniVisualizerGlow: clampNumber(settings.miniVisualizerGlow, 0, 2, DEFAULT_VISUALIZER_SETTINGS.miniVisualizerGlow),
   miniVisualizerMirror: settings.miniVisualizerMirror !== false,
+  eqPreset: typeof settings.eqPreset === 'string' ? settings.eqPreset : DEFAULT_VISUALIZER_SETTINGS.eqPreset,
 });
 
 const safeJSONParse = (raw, fallback) => {
@@ -171,11 +173,35 @@ export const MusicProvider = ({ children }) => {
     setVisualizerSettings((prev) => {
       const nextGains = [...(prev.eqGains || DEFAULT_VISUALIZER_SETTINGS.eqGains)];
       nextGains[index] = gain;
-      const next = sanitizeVisualizerSettings({ ...prev, eqGains: nextGains });
+      const next = sanitizeVisualizerSettings({ ...prev, eqGains: nextGains, eqPreset: 'custom' });
       persistVisualizerSettings(next);
       return next;
     });
   }, [persistVisualizerSettings]);
+
+  const applyEQPreset = useCallback((presetName, gains, bassBoost = visualizerSettings.bassBoost) => {
+    const nextGains = Array.isArray(gains)
+      ? gains.map((gain) => clampNumber(gain, -12, 12, 0))
+      : DEFAULT_VISUALIZER_SETTINGS.eqGains;
+    if (eqNodesRef.current.length > 0) {
+      eqNodesRef.current.forEach((node, index) => {
+        node.gain.value = nextGains[index] || 0;
+      });
+    }
+    if (bassBoostRef.current) {
+      bassBoostRef.current.gain.value = bassBoost;
+    }
+    setVisualizerSettings((prev) => {
+      const next = sanitizeVisualizerSettings({
+        ...prev,
+        eqGains: nextGains,
+        bassBoost,
+        eqPreset: presetName,
+      });
+      persistVisualizerSettings(next);
+      return next;
+    });
+  }, [persistVisualizerSettings, visualizerSettings.bassBoost]);
 
   const setBassBoost = useCallback((gain) => {
     if (bassBoostRef.current) {
@@ -379,6 +405,7 @@ export const MusicProvider = ({ children }) => {
           content_thumbnail: track.thumbnail_url
         })
       }).catch(() => {}); // Ignore errors
+      fetch(`http://127.0.0.1:5000/api/songs/${track.id}/play`, { method: 'POST' }).catch(() => {});
       
       return true;
     } catch (error) {
@@ -483,6 +510,18 @@ export const MusicProvider = ({ children }) => {
     setQueue((prev) => prev.filter((track) => track.id !== trackId));
   }, []);
 
+  const moveQueueItem = useCallback((fromIndex, toIndex) => {
+    setQueue((prev) => {
+      if (!Array.isArray(prev) || prev.length < 2) return prev;
+      if (fromIndex === toIndex) return prev;
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= prev.length || toIndex >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  }, []);
+
   const clearQueue = useCallback(() => {
     setQueue([]);
   }, []);
@@ -580,6 +619,7 @@ export const MusicProvider = ({ children }) => {
         queue,
         history,
         removeFromQueue,
+        moveQueueItem,
         clearQueue,
         volume,
         isMainPlayerActive,
@@ -604,6 +644,7 @@ export const MusicProvider = ({ children }) => {
         crossfadeSeconds,
         setCrossfadeSeconds,
         setEQGain,
+        applyEQPreset,
         setBassBoost,
         setPlaybackRate,
         playOrder,

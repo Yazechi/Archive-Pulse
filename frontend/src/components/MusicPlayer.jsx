@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ListMusic,
   Maximize2,
@@ -24,6 +26,14 @@ const ORDER_META = {
   'repeat-one': { label: 'Repeat One', icon: Repeat },
   'repeat-all': { label: 'Repeat All', icon: Repeat },
 };
+
+const EQ_PRESETS = [
+  { id: 'flat', label: 'Flat', gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], bassBoost: 1 },
+  { id: 'bass-boost', label: 'Bass Boost', gains: [5, 4, 3, 1, 0, -1, -1, 0, 1, 1], bassBoost: 1.6 },
+  { id: 'vocal', label: 'Vocal', gains: [-2, -1, 0, 2, 3, 3, 2, 1, 0, -1], bassBoost: 1 },
+  { id: 'treble-boost', label: 'Treble', gains: [-2, -1, 0, 0, 1, 2, 3, 4, 5, 5], bassBoost: 0.9 },
+  { id: 'electronic', label: 'Electronic', gains: [3, 2, 1, 0, -1, 1, 2, 3, 2, 1], bassBoost: 1.3 },
+];
 
 const formatTime = (seconds) => {
   if (!Number.isFinite(seconds)) return '00:00';
@@ -255,6 +265,8 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
     lyricsLoading,
     crossfadeSeconds,
     setCrossfadeSeconds,
+    moveQueueItem,
+    applyEQPreset,
   } = useMusic();
 
   const [currentTime, setCurrentTime] = useState(0);
@@ -461,19 +473,38 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
                 </div>
                 <div className="h-[calc(100%-56px)] overflow-y-auto custom-scrollbar">
                   {queue.map((track, index) => (
-                    <button
+                    <div
                       key={`${track.id}-${index}`}
-                      onClick={() => playTrack(track, queue)}
-                      className={`w-full flex items-center gap-3 p-3 border-b border-white/5 text-left ${
+                      className={`w-full flex items-center gap-3 p-3 border-b border-white/5 ${
                         currentTrack.id === track.id ? 'bg-primary/15' : 'hover:bg-white/5'
                       }`}
                     >
-                      <img src={toThumb(track.thumbnail_url)} alt="" className="w-10 h-10 rounded-lg object-cover border border-white/10" />
-                      <div className="min-w-0">
-                        <p className="text-xs text-white truncate">{track.title}</p>
-                        <p className="text-[10px] text-white/50 uppercase tracking-widest truncate">{track.artist}</p>
+                      <button onClick={() => playTrack(track, queue)} className="min-w-0 flex-1 flex items-center gap-3 text-left">
+                        <img src={toThumb(track.thumbnail_url)} alt="" className="w-10 h-10 rounded-lg object-cover border border-white/10" />
+                        <div className="min-w-0">
+                          <p className="text-xs text-white truncate">{track.title}</p>
+                          <p className="text-[10px] text-white/50 uppercase tracking-widest truncate">{track.artist}</p>
+                        </div>
+                      </button>
+                      <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => moveQueueItem(index, Math.max(0, index - 1))}
+                          disabled={index === 0}
+                          className="p-1 rounded border border-white/10 text-white/60 disabled:opacity-30"
+                          title="Move up"
+                        >
+                          <ArrowUp size={12} />
+                        </button>
+                        <button
+                          onClick={() => moveQueueItem(index, Math.min(queue.length - 1, index + 1))}
+                          disabled={index === queue.length - 1}
+                          className="p-1 rounded border border-white/10 text-white/60 disabled:opacity-30"
+                          title="Move down"
+                        >
+                          <ArrowDown size={12} />
+                        </button>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               </aside>
@@ -588,6 +619,22 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
                   className="w-24 md:w-32 accent-cyan-300"
                 />
                 <span className="text-[10px] text-white/60 w-7 text-right">{crossfadeSeconds}s</span>
+              </div>
+              <div className="ml-3 flex items-center gap-1.5">
+                <span className="text-[10px] text-white/60 uppercase tracking-widest">EQ</span>
+                {EQ_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    onClick={() => applyEQPreset(preset.id, preset.gains, preset.bassBoost)}
+                    className={`px-2 py-1 rounded border text-[9px] uppercase tracking-widest ${
+                      visualizerSettings.eqPreset === preset.id
+                        ? 'border-primary text-primary bg-primary/10'
+                        : 'border-white/10 text-white/60'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
               <button onClick={() => toggleMainPlayer(false)} className="ml-auto p-2 rounded-lg border border-white/10 text-white/70 hover:text-white tap-press">
                 <Maximize2 size={14} />

@@ -55,6 +55,7 @@ const initDb = async () => {
         source_id VARCHAR(255),
         thumbnail_url TEXT,
         last_position FLOAT DEFAULT 0,
+        play_count INT DEFAULT 0,
         last_played_at TIMESTAMP NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_source (source, source_id)
@@ -239,6 +240,22 @@ const initDb = async () => {
       )
     `);
 
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS chapter_bookmarks (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        book_id INT NOT NULL,
+        bookmark_type ENUM('manga', 'epub', 'pdf') NOT NULL DEFAULT 'manga',
+        chapter_id VARCHAR(255) NULL,
+        chapter_title VARCHAR(500) NULL,
+        locator VARCHAR(512) NULL,
+        note VARCHAR(500) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_chapter_bookmarks_book (book_id),
+        UNIQUE KEY unique_chapter_bookmark (book_id, bookmark_type, chapter_id, locator(255)),
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+      )
+    `);
+
     // Download Queue
     await conn.query(`
       CREATE TABLE IF NOT EXISTS downloads (
@@ -272,6 +289,7 @@ const initDb = async () => {
     try { await conn.query('ALTER TABLE books ADD COLUMN series_id INT NULL'); } catch (e) {}
     try { await conn.query('ALTER TABLE books ADD COLUMN volume_number FLOAT NULL'); } catch (e) {}
     try { await conn.query('ALTER TABLE books ADD COLUMN last_chapter_title VARCHAR(255)'); } catch (e) {}
+    try { await conn.query('ALTER TABLE songs ADD COLUMN play_count INT DEFAULT 0'); } catch (e) {}
 
     const [columns] = await conn.query('SHOW COLUMNS FROM books');
     console.log('Books Table Columns:', columns.map(c => c.Field).join(', '));
@@ -950,6 +968,18 @@ app.put('/api/songs/:id/progress', async (req, res) => {
       'UPDATE songs SET last_position = ?, last_played_at = CURRENT_TIMESTAMP WHERE id = ?',
       [position, id]
     );
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/songs/:id/play', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [result] = await pool.query(
+      'UPDATE songs SET play_count = play_count + 1, last_played_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Song not found' });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2685,6 +2715,160 @@ app.get('/api/stats/reading', async (req, res) => {
       avgPagesPerSession: Math.round(avgSession[0]?.avg_pages || 0),
       topBooks
     });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/play-counts', async (req, res) => {
+  try {
+    const [summary] = await pool.query(`
+      SELECT
+        COALESCE(SUM(play_count), 0) AS totalPlays,
+        COUNT(*) AS totalSongsPlayed
+      FROM songs
+      WHERE play_count > 0
+    `);
+    const [topSongs] = await pool.query(`
+      SELECT id, title, artist, thumbnail_url, play_count, last_played_at
+      FROM songs
+      WHERE play_count > 0
+      ORDER BY play_count DESC, last_played_at DESC
+      LIMIT 20
+    `);
+    res.json({
+      totalPlays: Number(summary[0]?.totalPlays || 0),
+      totalSongsPlayed: Number(summary[0]?.totalSongsPlayed || 0),
+      topSongs
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/reading-estimates', async (req, res) => {
+  try {
+    const [avgRows] = await pool.query(`
+      SELECT
+        COALESCE(SUM(duration_seconds) / NULLIF(SUM(pages_read), 0), 45) AS avg_seconds_per_page
+      FROM reading_sessions
+      WHERE duration_seconds > 0 AND pages_read > 0
+    `);
+    const avgSecondsPerPage = Number(avgRows[0]?.avg_seconds_per_page || 45);
+
+    const [rows] = await pool.query(`
+      SELECT
+        b.id,
+        b.title,
+        b.author,
+        b.thumbnail_url,
+        b.progress,
+        b.total_pages,
+        GREATEST(ROUND((b.total_pages * (100 - COALESCE(b.progress, 0))) / 100), 0) AS remaining_pages
+      FROM books b
+      WHERE b.type = 'book'
+        AND b.total_pages IS NOT NULL
+        AND b.total_pages > 0
+        AND COALESCE(b.progress, 0) < 100
+      ORDER BY b.last_read_at DESC, b.created_at DESC
+    `);
+
+    const estimates = rows.map((book) => {
+      const remainingPages = Number(book.remaining_pages || 0);
+      const remainingSeconds = Math.round(remainingPages * avgSecondsPerPage);
+      return {
+        ...book,
+        remaining_pages: remainingPages,
+        remaining_seconds: remainingSeconds,
+        remaining_minutes: Math.max(1, Math.round(remainingSeconds / 60))
+      };
+    });
+
+    res.json({ avgSecondsPerPage: Math.round(avgSecondsPerPage), estimates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/books/:bookId/reading-estimate', async (req, res) => {
+  const { bookId } = req.params;
+  try {
+    const [[book]] = await pool.query(`
+      SELECT id, title, type, progress, total_pages
+      FROM books
+      WHERE id = ?
+      LIMIT 1
+    `, [bookId]);
+
+    if (!book) return res.status(404).json({ error: 'Book not found' });
+    if (book.type !== 'book' || !book.total_pages || Number(book.total_pages) <= 0) {
+      return res.json({ available: false });
+    }
+
+    const [avgRows] = await pool.query(`
+      SELECT
+        COALESCE(SUM(duration_seconds) / NULLIF(SUM(pages_read), 0), 45) AS avg_seconds_per_page
+      FROM reading_sessions
+      WHERE duration_seconds > 0 AND pages_read > 0
+    `);
+    const avgSecondsPerPage = Number(avgRows[0]?.avg_seconds_per_page || 45);
+    const remainingPages = Math.max(
+      0,
+      Math.round((Number(book.total_pages) * (100 - Number(book.progress || 0))) / 100)
+    );
+    const remainingSeconds = Math.round(remainingPages * avgSecondsPerPage);
+
+    res.json({
+      available: true,
+      avgSecondsPerPage: Math.round(avgSecondsPerPage),
+      remaining_pages: remainingPages,
+      remaining_seconds: remainingSeconds,
+      remaining_minutes: Math.max(1, Math.round(remainingSeconds / 60))
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/books/:bookId/bookmarks', async (req, res) => {
+  const { bookId } = req.params;
+  const { type } = req.query;
+  try {
+    let query = `
+      SELECT id, book_id, bookmark_type, chapter_id, chapter_title, locator, note, created_at
+      FROM chapter_bookmarks
+      WHERE book_id = ?
+    `;
+    const params = [bookId];
+    if (type) {
+      query += ' AND bookmark_type = ?';
+      params.push(type);
+    }
+    query += ' ORDER BY created_at DESC';
+    const [rows] = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/books/:bookId/bookmarks', async (req, res) => {
+  const { bookId } = req.params;
+  const { bookmark_type = 'manga', chapter_id = null, chapter_title = null, locator = null, note = null } = req.body || {};
+  try {
+    if (!chapter_id && !locator) {
+      return res.status(400).json({ error: 'chapter_id or locator is required' });
+    }
+    const [result] = await pool.query(`
+      INSERT INTO chapter_bookmarks (book_id, bookmark_type, chapter_id, chapter_title, locator, note)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        chapter_title = VALUES(chapter_title),
+        note = VALUES(note),
+        created_at = CURRENT_TIMESTAMP
+    `, [bookId, bookmark_type, chapter_id, chapter_title, locator, note]);
+    res.status(201).json({ success: true, id: result.insertId || null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/books/:bookId/bookmarks/:bookmarkId', async (req, res) => {
+  const { bookId, bookmarkId } = req.params;
+  try {
+    await pool.query(
+      'DELETE FROM chapter_bookmarks WHERE id = ? AND book_id = ?',
+      [bookmarkId, bookId]
+    );
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

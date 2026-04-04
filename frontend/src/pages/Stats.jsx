@@ -11,6 +11,7 @@ const Stats = () => {
   const [readingStats, setReadingStats] = useState(null);
   const [activityStats, setActivityStats] = useState(null);
   const [generalStats, setGeneralStats] = useState(null);
+  const [playCountStats, setPlayCountStats] = useState({ totalPlays: 0, totalSongsPlayed: 0, topSongs: [] });
   const [favoritesStats, setFavoritesStats] = useState({ total: 0, songs: 0, books: 0, videos: 0 });
   const [downloadsStats, setDownloadsStats] = useState({ active: 0, completed: 0, failed: 0 });
   const [annotationStats, setAnnotationStats] = useState({ total: 0, withNotes: 0 });
@@ -21,17 +22,19 @@ const Stats = () => {
     const fetchStats = async () => {
       setLoading(true);
       try {
-        const [readingRes, activityRes, generalRes, favoritesRes, downloadsRes, annotationsRes] = await Promise.all([
+        const [readingRes, activityRes, generalRes, favoritesRes, downloadsRes, annotationsRes, playCountsRes] = await Promise.all([
           axios.get(`${API_BASE}/api/stats/reading?days=${timeRange}`),
           axios.get(`${API_BASE}/api/activity/stats?days=${timeRange}`),
           axios.get(`${API_BASE}/api/stats`),
           axios.get(`${API_BASE}/api/favorites`).catch(() => ({ data: [] })),
           axios.get(`${API_BASE}/api/downloads`).catch(() => ({ data: [] })),
-          axios.get(`${API_BASE}/api/annotations`).catch(() => ({ data: [] }))
+          axios.get(`${API_BASE}/api/annotations`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/stats/play-counts`).catch(() => ({ data: { totalPlays: 0, totalSongsPlayed: 0, topSongs: [] } })),
         ]);
         setReadingStats(readingRes.data);
         setActivityStats(activityRes.data);
         setGeneralStats(generalRes.data);
+        setPlayCountStats(playCountsRes.data || { totalPlays: 0, totalSongsPlayed: 0, topSongs: [] });
         const favorites = Array.isArray(favoritesRes.data) ? favoritesRes.data : [];
         setFavoritesStats({
           total: favorites.length,
@@ -294,6 +297,20 @@ const Stats = () => {
           <Music size={20} className="text-green-400" />
           Listening Statistics
         </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard
+            icon={TrendingUp}
+            label="Total Plays"
+            value={playCountStats?.totalPlays || 0}
+            subValue="all-time"
+          />
+          <StatCard
+            icon={Music}
+            label="Songs Played"
+            value={playCountStats?.totalSongsPlayed || 0}
+            subValue="all-time unique"
+          />
+        </div>
 
         {/* Listening Chart */}
         <div className="card p-6">
@@ -301,24 +318,25 @@ const Stats = () => {
         </div>
 
         {/* Top Songs */}
-        {activityStats?.topSongs?.length > 0 && (
+        {playCountStats?.topSongs?.length > 0 && (
           <div className="card p-6 space-y-4">
             <h3 className="tech-label">Most Played Songs</h3>
             <div className="space-y-3">
-              {activityStats.topSongs.slice(0, 5).map((song, i) => (
-                <div key={i} className="flex items-center gap-4">
+              {playCountStats.topSongs.slice(0, 5).map((song, i) => (
+                <div key={song.id} className="flex items-center gap-4">
                   <span className="w-6 text-center font-mono text-sm text-white/40">{i + 1}</span>
                   <div className="w-10 h-10 rounded-lg overflow-hidden bg-zinc-900 border border-border shrink-0">
-                    {song.content_thumbnail && (
+                    {song.thumbnail_url && (
                       <img
-                        src={song.content_thumbnail.startsWith('http') ? song.content_thumbnail : `${API_BASE}${song.content_thumbnail}`}
+                        src={song.thumbnail_url.startsWith('http') ? song.thumbnail_url : `${API_BASE}${song.thumbnail_url}`}
                         className="w-full h-full object-cover"
                         alt=""
                       />
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-white truncate">{song.content_title}</p>
+                    <p className="text-sm font-semibold text-white truncate">{song.title}</p>
+                    <p className="tech-label-sm truncate">{song.artist || 'Unknown'}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-semibold text-primary">{song.play_count} plays</p>
