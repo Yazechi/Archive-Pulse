@@ -2395,12 +2395,26 @@ app.get('/api/lyrics', async (req, res) => {
     const normalize = (value = '') => String(value)
       .toLowerCase()
       .replace(/\(.*?\)|\[.*?\]|feat\.?.*$/gi, '')
-      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     const overlapScore = (a = '', b = '') => {
-      const setA = new Set(a.split(' ').filter(Boolean));
-      const setB = new Set(b.split(' ').filter(Boolean));
+      const toTokens = (value = '') => {
+        const trimmed = String(value).trim();
+        if (!trimmed) return [];
+        if (/\s/.test(trimmed)) {
+          return trimmed.split(' ').filter(Boolean);
+        }
+        const chars = Array.from(trimmed);
+        if (chars.length <= 2) return chars;
+        const grams = [];
+        for (let i = 0; i < chars.length - 1; i += 1) {
+          grams.push(`${chars[i]}${chars[i + 1]}`);
+        }
+        return grams;
+      };
+      const setA = new Set(toTokens(a));
+      const setB = new Set(toTokens(b));
       if (!setA.size || !setB.size) return 0;
       let common = 0;
       setA.forEach((token) => {
@@ -2500,7 +2514,7 @@ app.get('/api/lyrics', async (req, res) => {
         if (cTitle === wantedTitle) score += 6;
         else if (cTitle.includes(wantedTitle) || wantedTitle.includes(cTitle)) score += 3;
         score += titleOverlap * 3;
-        if (titleOverlap < 0.35) score -= 2.5;
+        if (titleOverlap < 0.2) score -= 1.8;
         if (preferredParsedArtist && cArtist && overlapScore(cArtist, preferredParsedArtist) < 0.2) score -= 2;
         if (providedArtistGeneric && preferredArtist && cArtist && overlapScore(cArtist, preferredArtist) < 0.2) score -= 1;
         if (c.syncedLyrics) score += 1;
@@ -2509,7 +2523,7 @@ app.get('/api/lyrics', async (req, res) => {
       })
       .sort((a, b) => b.score - a.score);
 
-    if (!scored.length || scored[0].score < 3.5) {
+    if (!scored.length || scored[0].score < 2.8) {
       return res.status(404).json({ error: 'Lyrics not found' });
     }
     const best = scored[0]?.c;
