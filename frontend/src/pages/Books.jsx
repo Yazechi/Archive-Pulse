@@ -315,7 +315,7 @@ const Books = () => {
                   </div>
 
                   {!isBatchMode && (
-                    <div className="absolute top-4 right-4 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    <div className="absolute top-4 right-4 flex gap-1 opacity-100 transition-all">
                       <div onClick={(e) => e.stopPropagation()}>
                         <TagSelector
                           contentType="book"
@@ -323,6 +323,8 @@ const Books = () => {
                           selectedTags={bookTags[book.id] || []}
                           onTagsChange={(tags) => setBookTags((prev) => ({ ...prev, [book.id]: tags }))}
                           position="bottom"
+                          iconSize={16}
+                          buttonClassName="p-2 rounded-lg bg-black/70 border border-white/20 text-white/80 hover:text-primary hover:border-primary/50"
                         />
                       </div>
                       <FavoriteButton
@@ -330,10 +332,11 @@ const Books = () => {
                         contentId={book.id}
                         isFavorite={isFavorite(book.id)}
                         onToggle={(next) => setFavoriteState(book.id, next)}
-                        size="sm"
+                        size="md"
+                        className="p-2 rounded-lg bg-black/70 border border-white/20 text-white/80 hover:border-red-400/60"
                       />
-                      <button onClick={(e) => openEditModal(book, e)} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-primary">Edit</button>
-                      <button onClick={(e) => { e.stopPropagation(); deleteBook(book.id); }} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-red-400"><Trash2 size={16} /></button>
+                      <button onClick={(e) => openEditModal(book, e)} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-primary opacity-0 group-hover:opacity-100">Edit</button>
+                      <button onClick={(e) => { e.stopPropagation(); deleteBook(book.id); }} className="p-2 bg-black/60 rounded-lg text-white/40 hover:text-red-400 opacity-0 group-hover:opacity-100"><Trash2 size={16} /></button>
                     </div>
                   )}
                 </div>

@@ -126,8 +126,13 @@ export const MusicProvider = ({ children }) => {
   const [isMainPlayerActive, setIsMainPlayerActive] = useState(false);
   const [isMainPlayerExpanded, setIsMainPlayerExpanded] = useState(false);
   const [analyser, setAnalyser] = useState(null);
-  const [lyrics] = useState([]);
+  const [lyrics, setLyrics] = useState([]);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
   const [currentLyricIndex] = useState(-1);
+  const [crossfadeSeconds, setCrossfadeSeconds] = useState(() => {
+    const stored = Number(localStorage.getItem('archive-crossfade-seconds'));
+    return Number.isFinite(stored) ? Math.min(12, Math.max(0, stored)) : 3;
+  });
   const [playOrder, setPlayOrder] = useState(() => {
     const stored = localStorage.getItem('archive-play-order');
     return PLAY_ORDER_MODES.includes(stored) ? stored : 'normal';
@@ -143,6 +148,9 @@ export const MusicProvider = ({ children }) => {
   const sourceRef = useRef(null);
   const eqNodesRef = useRef([]);
   const bassBoostRef = useRef(null);
+  const crossfadeTimerRef = useRef(null);
+  const crossfadeAdvanceRef = useRef(false);
+  const resolvedStreamUrlsRef = useRef(new Map());
 
   const persistVisualizerSettings = useCallback((next) => {
     localStorage.setItem('archive-visualizer-settings', JSON.stringify(next));
@@ -251,6 +259,10 @@ export const MusicProvider = ({ children }) => {
     localStorage.setItem('archive-play-order', playOrder);
   }, [playOrder]);
 
+  useEffect(() => {
+    localStorage.setItem('archive-crossfade-seconds', String(crossfadeSeconds));
+  }, [crossfadeSeconds]);
+
   const getTrackUrl = useCallback((track) => {
     const sourceId = track.source_id || track.id;
     if (track.source === 'youtube') {
@@ -259,12 +271,53 @@ export const MusicProvider = ({ children }) => {
     return `http://127.0.0.1:5000/uploads/music/${sourceId}`;
   }, []);
 
-  const playTrack = useCallback(async (track, trackList = []) => {
+  const warmupStreamUrls = useCallback((tracks = []) => {
+    tracks
+      .filter((item) => item?.source === 'youtube')
+      .slice(0, 6)
+      .forEach((item) => {
+        const sourceId = item.source_id || item.id;
+        if (!sourceId || resolvedStreamUrlsRef.current.has(sourceId)) return;
+        fetch(`http://127.0.0.1:5000/api/resolve-stream/${sourceId}`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data?.url) resolvedStreamUrlsRef.current.set(sourceId, data.url);
+          })
+          .catch(() => {});
+      });
+  }, []);
+
+  const fadeAudioVolume = useCallback((from, to, durationMs) => new Promise((resolve) => {
+    if (crossfadeTimerRef.current) {
+      window.clearInterval(crossfadeTimerRef.current);
+      crossfadeTimerRef.current = null;
+    }
+    const audio = audioRef.current;
+    const duration = Math.max(120, durationMs);
+    const stepMs = 40;
+    const steps = Math.max(1, Math.floor(duration / stepMs));
+    let step = 0;
+    audio.volume = from;
+    crossfadeTimerRef.current = window.setInterval(() => {
+      step += 1;
+      const t = Math.min(1, step / steps);
+      audio.volume = from + (to - from) * t;
+      if (t >= 1) {
+        window.clearInterval(crossfadeTimerRef.current);
+        crossfadeTimerRef.current = null;
+        resolve();
+      }
+    }, stepMs);
+  }), []);
+
+  const playTrack = useCallback(async (track, trackList = [], options = {}) => {
     if (!track) return false;
     initAudioContext();
+    const useTransition = options.useTransition !== false;
 
     if (trackList.length > 0) {
       setQueue(trackList);
+      warmupStreamUrls(trackList);
     } else {
       setQueue((prev) => {
         if (prev.length === 0) return [track];
@@ -286,15 +339,34 @@ export const MusicProvider = ({ children }) => {
       setHistory((prev) => [currentTrack, ...prev.filter((item) => item.id !== currentTrack.id)].slice(0, 20));
     }
 
-    audioRef.current.src = getTrackUrl(track);
-    audioRef.current.currentTime = track.last_position || 0;
-    audioRef.current.crossOrigin = 'anonymous';
-    setCurrentTrack(track);
-
+    const audio = audioRef.current;
+    const targetVolume = volume;
+    const shouldCrossfade = useTransition && crossfadeSeconds > 0 && isPlaying && currentTrack;
     try {
-      await audioRef.current.play();
+      if (shouldCrossfade) {
+        const fadeDuration = Math.max(250, Math.floor((crossfadeSeconds * 1000) / 2));
+        await fadeAudioVolume(audio.volume, 0, fadeDuration);
+      }
+
+      audio.src = getTrackUrl(track);
+      const shouldResumeFromLast = options.resumeFromLast === true;
+      const resumeAt = shouldResumeFromLast ? Number(track.last_position) || 0 : 0;
+      audio.currentTime = Math.max(0, resumeAt);
+      audio.crossOrigin = 'anonymous';
+      audio.preload = 'auto';
+      setCurrentTrack(track);
+      crossfadeAdvanceRef.current = false;
+      if (shouldCrossfade) audio.volume = 0;
+
+      await audio.play();
       setIsPlaying(true);
-      
+
+      if (shouldCrossfade) {
+        await fadeAudioVolume(0, targetVolume, Math.max(250, Math.floor((crossfadeSeconds * 1000) / 2)));
+      } else {
+        audio.volume = targetVolume;
+      }
+
       // Log play activity (fire and forget)
       fetch('http://127.0.0.1:5000/api/activity', {
         method: 'POST',
@@ -314,7 +386,7 @@ export const MusicProvider = ({ children }) => {
       setIsPlaying(false);
       return false;
     }
-  }, [currentTrack, getTrackUrl, initAudioContext, isPlaying]);
+  }, [crossfadeSeconds, currentTrack, fadeAudioVolume, getTrackUrl, initAudioContext, isPlaying, volume, warmupStreamUrls]);
 
   const getCurrentIndex = useCallback(() => {
     if (!currentTrack || queue.length === 0) return -1;
@@ -416,25 +488,75 @@ export const MusicProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const fetchLyrics = async () => {
+      if (!currentTrack?.title) {
+        setLyrics([]);
+        return;
+      }
+      setLyricsLoading(true);
+      try {
+        const queryParts = deriveLyricsQuery(currentTrack);
+        const query = new URLSearchParams({
+          title: queryParts.title,
+        });
+        if (queryParts.artist) query.set('artist', queryParts.artist);
+        const res = await fetch(
+          `http://127.0.0.1:5000/api/lyrics?${query.toString()}`
+        );
+        if (!res.ok) throw new Error('lyrics unavailable');
+        const data = await res.json();
+        if (!cancelled) setLyrics(normalizeLyricsPayload(data));
+      } catch {
+        if (!cancelled) setLyrics([]);
+      } finally {
+        if (!cancelled) setLyricsLoading(false);
+      }
+    };
+    fetchLyrics();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack?.title, currentTrack?.artist]);
+
+  useEffect(() => {
     const audio = audioRef.current;
     audio.volume = volume;
     audio.crossOrigin = 'anonymous';
+    audio.preload = 'auto';
 
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
+    const handleTimeUpdate = () => {
+      if (!crossfadeSeconds || crossfadeSeconds <= 0 || crossfadeAdvanceRef.current) return;
+      const duration = Number(audio.duration);
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      const threshold = Math.max(0.8, crossfadeSeconds);
+      if (audio.currentTime >= duration - threshold) {
+        crossfadeAdvanceRef.current = true;
+        void nextTrack();
+      }
+    };
     const handleEnded = () => {
+      crossfadeAdvanceRef.current = false;
       void nextTrack();
     };
 
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('ended', handleEnded);
     return () => {
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('ended', handleEnded);
+      if (crossfadeTimerRef.current) {
+        window.clearInterval(crossfadeTimerRef.current);
+        crossfadeTimerRef.current = null;
+      }
     };
-  }, [nextTrack, volume]);
+  }, [crossfadeSeconds, nextTrack, volume]);
 
   const currentIndex = useMemo(() => getCurrentIndex(), [getCurrentIndex]);
   const canPrev = useMemo(() => {
@@ -477,7 +599,10 @@ export const MusicProvider = ({ children }) => {
         visualizerSettings,
         updateVisualizerSettings,
         lyrics,
+        lyricsLoading,
         currentLyricIndex,
+        crossfadeSeconds,
+        setCrossfadeSeconds,
         setEQGain,
         setBassBoost,
         setPlaybackRate,
@@ -490,3 +615,38 @@ export const MusicProvider = ({ children }) => {
     </MusicContext.Provider>
   );
 };
+const deriveLyricsQuery = (track) => {
+  const rawTitle = String(track?.title || '').trim();
+  const rawArtist = String(track?.artist || '').trim();
+  const stripped = rawTitle
+    .split('|')[0]
+    .replace(/\((official|lyrics?|audio|video|hd)\)/gi, '')
+    .trim();
+  const splitIdx = stripped.indexOf(' - ');
+  if (splitIdx !== -1) {
+    const parsedArtist = stripped.slice(0, splitIdx).trim();
+    const parsedTitle = stripped.slice(splitIdx + 3).trim();
+    if (parsedArtist && parsedTitle) {
+      return { artist: parsedArtist, title: parsedTitle };
+    }
+  }
+  return { artist: rawArtist, title: rawTitle };
+};
+const normalizeLyricsPayload = (data) => {
+    if (Array.isArray(data?.syncedLines) && data.syncedLines.length > 0) {
+      return data.syncedLines
+        .map((line) => ({
+          time: Number(line.time),
+          text: String(line.text || '').trim(),
+          synced: true,
+        }))
+        .filter((line) => Number.isFinite(line.time) && line.time >= 0 && line.text);
+    }
+    if (Array.isArray(data?.lines)) {
+      return data.lines
+        .map((line) => String(line || '').trim())
+        .filter(Boolean)
+        .map((text) => ({ time: null, text, synced: false }));
+    }
+    return [];
+  };

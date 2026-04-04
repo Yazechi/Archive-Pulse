@@ -34,6 +34,7 @@ const Sidebar = () => {
     { name: 'Videos', icon: 'movie', path: '/videos' },
     { name: 'Discovery', icon: 'explore', path: '/search' },
     { name: 'Data Entry', icon: 'upload_file', path: '/upload' },
+    { name: 'Favorites', icon: 'favorite', path: '/favorites' },
     { name: 'Downloads', icon: 'download', path: '/downloads' },
     { name: 'Activity', icon: 'history', path: '/activity' },
     { name: 'Stats', icon: 'analytics', path: '/stats' },

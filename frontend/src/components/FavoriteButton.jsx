@@ -5,7 +5,7 @@ import { Heart } from 'lucide-react';
 const API_BASE = 'http://127.0.0.1:5000';
 
 // Heart button for favoriting content
-export const FavoriteButton = ({ contentType, contentId, isFavorite = false, onToggle, size = 'md' }) => {
+export const FavoriteButton = ({ contentType, contentId, isFavorite = false, onToggle, size = 'md', className = '' }) => {
   const [favorite, setFavorite] = useState(Boolean(isFavorite));
   const [loading, setLoading] = useState(false);
 
@@ -14,7 +14,7 @@ export const FavoriteButton = ({ contentType, contentId, isFavorite = false, onT
   }, [isFavorite, contentId, contentType]);
 
   const sizeClasses = {
-    sm: 12,
+    sm: 14,
     md: 16,
     lg: 20,
   };
@@ -44,7 +44,7 @@ export const FavoriteButton = ({ contentType, contentId, isFavorite = false, onT
     <button
       onClick={toggleFavorite}
       disabled={loading}
-      className={`transition-all ${loading ? 'opacity-50' : ''} ${
+      className={`transition-all ${className} ${loading ? 'opacity-50' : ''} ${
         favorite 
           ? 'text-red-500 hover:text-red-400' 
           : 'text-white/40 hover:text-red-400'

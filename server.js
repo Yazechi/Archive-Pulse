@@ -1566,91 +1566,111 @@ app.delete('/api/playlists/:id/songs/:songId', async (req, res) => {
 });
 
 // --- ROUTES: STREAMING ---
+const { spawn } = require('child_process');
+const ytStreamUrlCache = new Map();
+const YT_STREAM_TTL_MS = 10 * 60 * 1000;
 
-app.get('/api/stream/:id', (req, res) => {
-  const videoId = req.params.id;
-  res.header('Content-Type', 'audio/webm');
-  res.header('Accept-Ranges', 'bytes');
-  res.header('Cache-Control', 'no-store');
+const resolveYouTubeStreamUrl = (videoId, retryWithEdge = false) => new Promise((resolve, reject) => {
+  const now = Date.now();
+  const cached = ytStreamUrlCache.get(videoId);
+  if (cached && cached.expiresAt > now) {
+    return resolve({ url: cached.url, cached: true });
+  }
 
-  const isExpectedTermination = (err) => {
-    if (!err) return false;
-    const msg = (err.message || '').toLowerCase();
-    const signal = err.signalCode || err.signal;
-    return (
-      signal === 'SIGTERM' ||
-      signal === 'SIGKILL' ||
-      msg.includes('aborted') ||
-      msg.includes('premature close') ||
-      msg.includes('socket hang up')
-    );
-  };
-  
-  const startStream = (retryWithEdge = false) => {
-    try {
-      const options = {
-        output: '-',
-        format: 'bestaudio/best',
-        quiet: true,
-        noWarnings: true,
-      };
+  const args = [
+    `https://www.youtube.com/watch?v=${videoId}`,
+    '--get-url',
+    '--format', 'bestaudio/best',
+    '--no-warnings',
+    '--quiet',
+  ];
 
-      const browser = retryWithEdge ? 'chrome' : process.env.COOKIES_FROM_BROWSER;
-      if (browser) {
-        options.cookiesFromBrowser = browser;
-      } else if (process.env.YT_COOKIES) {
-        options.cookies = process.env.YT_COOKIES;
+  const browser = retryWithEdge ? 'chrome' : process.env.COOKIES_FROM_BROWSER;
+  if (browser) {
+    args.push('--cookies-from-browser', browser);
+  } else if (process.env.YT_COOKIES) {
+    args.push('--cookies', process.env.YT_COOKIES);
+  }
+
+  const proc = spawn('yt-dlp', args);
+  let stdout = '';
+  let stderr = '';
+
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString();
+  });
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  proc.on('error', (error) => reject(error));
+  proc.on('close', (code) => {
+    if (code !== 0) {
+      const cookieLocked = stderr.includes('Could not copy') && stderr.includes('cookie');
+      if (!retryWithEdge && cookieLocked) {
+        return resolve(resolveYouTubeStreamUrl(videoId, true));
       }
-
-      const ytdlProcess = youtubedl.exec(`https://www.youtube.com/watch?v=${videoId}`, options);
-      let cleanedUp = false;
-      const cleanup = () => {
-        if (cleanedUp) return;
-        cleanedUp = true;
-        if (ytdlProcess?.stdout) ytdlProcess.stdout.unpipe(res);
-        if (ytdlProcess?.kill) ytdlProcess.kill('SIGTERM');
-      };
-
-      ytdlProcess.stdout.pipe(res);
-
-      // youtube-dl-exec returns a thenable that rejects on non-zero exit;
-      // consume that rejection so expected SIGTERM does not pollute logs.
-      if (typeof ytdlProcess.catch === 'function') {
-        ytdlProcess.catch((err) => {
-          if (isExpectedTermination(err)) return;
-          const errorStr = err?.message || '';
-          if (!retryWithEdge && errorStr.includes('Could not copy') && errorStr.includes('cookie')) {
-            console.warn('Stream cookies locked, falling back to msedge...');
-            cleanup();
-            return startStream(true);
-          }
-          console.error('YTDL Stream Promise Error:', err);
-          if (!res.headersSent) res.status(500).end();
-        });
-      }
-
-      ytdlProcess.on('error', (err) => {
-        if (isExpectedTermination(err)) return;
-        const errorStr = err?.message || '';
-        if (!retryWithEdge && errorStr.includes('Could not copy') && errorStr.includes('cookie')) {
-          console.warn('Stream cookies locked, falling back to msedge...');
-          cleanup();
-          return startStream(true);
-        }
-        console.error('YTDL Stream Error:', err);
-        if (!res.headersSent) res.status(500).end();
-      });
-
-      req.on('close', cleanup);
-      req.on('aborted', cleanup);
-      res.on('close', cleanup);
-    } catch (err) {
-      console.error('Stream setup error:', err);
-      if (!res.headersSent) res.status(500).end();
+      return reject(new Error(stderr || `yt-dlp exited with code ${code}`));
     }
-  };
+    const url = stdout.split('\n').map((line) => line.trim()).find(Boolean);
+    if (!url) {
+      return reject(new Error('No stream URL returned by yt-dlp'));
+    }
+    ytStreamUrlCache.set(videoId, { url, expiresAt: now + YT_STREAM_TTL_MS });
+    resolve({ url, cached: false });
+  });
+});
 
-  startStream();
+app.get('/api/stream/resolve/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await resolveYouTubeStreamUrl(id);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to resolve stream URL', details: err.message });
+  }
+});
+
+app.get('/api/resolve-stream/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await resolveYouTubeStreamUrl(id);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to resolve stream URL', details: err.message });
+  }
+});
+
+app.get('/api/stream/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await resolveYouTubeStreamUrl(id);
+    const upstream = await axios.get(result.url, {
+      responseType: 'stream',
+      headers: req.headers.range ? { Range: req.headers.range } : {},
+      timeout: 30000,
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    if (upstream.headers['content-type']) {
+      res.setHeader('Content-Type', upstream.headers['content-type']);
+    } else {
+      res.setHeader('Content-Type', 'audio/webm');
+    }
+    res.setHeader('Cache-Control', 'private, max-age=120');
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    res.status(upstream.status);
+
+    upstream.data.pipe(res);
+    req.on('close', () => {
+      if (upstream?.data?.destroy) upstream.data.destroy();
+    });
+  } catch (err) {
+    console.error('Stream resolve error:', err.message);
+    res.status(500).json({ error: 'Failed to resolve stream URL' });
+  }
 });
 
 // ============================================
@@ -2283,6 +2303,244 @@ app.get('/api/favorites/check/:contentType/:contentId', async (req, res) => {
     );
     res.json({ isFavorite: rows.length > 0 });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Continue where you left off (song/book/video)
+app.get('/api/continue', async (req, res) => {
+  try {
+    const [songs] = await pool.query(`
+      SELECT id, title, artist, thumbnail_url, duration, last_position, last_played_at
+      FROM songs
+      WHERE last_played_at IS NOT NULL
+      ORDER BY last_played_at DESC
+      LIMIT 1
+    `);
+
+    const [books] = await pool.query(`
+      SELECT id, title, author, type, thumbnail_url, progress, last_page, last_chapter_title, last_read_at
+      FROM books
+      WHERE (type = 'manga' AND last_page IS NOT NULL)
+         OR (type <> 'manga' AND progress > 0 AND progress < 100)
+      ORDER BY last_read_at DESC
+      LIMIT 1
+    `);
+
+    const [videos] = await pool.query(`
+      SELECT id, title, type, thumbnail_url, progress, last_position, last_watched_at
+      FROM videos
+      WHERE last_watched_at IS NOT NULL
+      ORDER BY last_watched_at DESC
+      LIMIT 1
+    `);
+
+    res.json({
+      song: songs[0] || null,
+      book: books[0] || null,
+      video: videos[0] || null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Duplicate detection helper
+app.get('/api/duplicates/check', async (req, res) => {
+  const { content_type, source_id, source_url, title } = req.query;
+  try {
+    if (!content_type) return res.status(400).json({ error: 'content_type is required' });
+
+    let rows = [];
+    if (content_type === 'song') {
+      const [bySourceId] = source_id
+        ? await pool.query('SELECT id, title, artist, source_id FROM songs WHERE source_id = ? LIMIT 5', [source_id])
+        : [[]];
+      if (bySourceId.length > 0) rows = bySourceId;
+      else if (title) {
+        const [byTitle] = await pool.query('SELECT id, title, artist, source_id FROM songs WHERE LOWER(title) = LOWER(?) LIMIT 5', [title]);
+        rows = byTitle;
+      }
+    } else if (content_type === 'book') {
+      const [bySourceUrl] = source_url
+        ? await pool.query('SELECT id, title, author, source_url, type FROM books WHERE source_url = ? LIMIT 5', [source_url])
+        : [[]];
+      if (bySourceUrl.length > 0) rows = bySourceUrl;
+      else if (title) {
+        const [byTitle] = await pool.query('SELECT id, title, author, source_url, type FROM books WHERE LOWER(title) = LOWER(?) LIMIT 5', [title]);
+        rows = byTitle;
+      }
+    } else if (content_type === 'video') {
+      const [bySourceId] = source_id
+        ? await pool.query('SELECT id, title, type, source_id FROM videos WHERE source_id = ? LIMIT 5', [source_id])
+        : [[]];
+      if (bySourceId.length > 0) rows = bySourceId;
+      else if (title) {
+        const [byTitle] = await pool.query('SELECT id, title, type, source_id FROM videos WHERE LOWER(title) = LOWER(?) LIMIT 5', [title]);
+        rows = byTitle;
+      }
+    } else {
+      return res.status(400).json({ error: 'Unsupported content_type' });
+    }
+
+    res.json({ isDuplicate: rows.length > 0, matches: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lyrics lookup
+app.get('/api/lyrics', async (req, res) => {
+  const { artist, title } = req.query;
+  if (!title) return res.status(400).json({ error: 'title is required' });
+  try {
+    const normalize = (value = '') => String(value)
+      .toLowerCase()
+      .replace(/\(.*?\)|\[.*?\]|feat\.?.*$/gi, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const overlapScore = (a = '', b = '') => {
+      const setA = new Set(a.split(' ').filter(Boolean));
+      const setB = new Set(b.split(' ').filter(Boolean));
+      if (!setA.size || !setB.size) return 0;
+      let common = 0;
+      setA.forEach((token) => {
+        if (setB.has(token)) common += 1;
+      });
+      return common / Math.max(setA.size, setB.size);
+    };
+    const parseSyncedLyrics = (raw = '') => {
+      const out = [];
+      const regex = /\[(\d{2}):(\d{2})(?:\.(\d{1,2}))?\](.*)/g;
+      let match;
+      while ((match = regex.exec(raw)) !== null) {
+        const min = Number(match[1]) || 0;
+        const sec = Number(match[2]) || 0;
+        const frac = match[3] ? Number(`0.${match[3].padEnd(2, '0')}`) : 0;
+        const text = (match[4] || '').trim();
+        if (!text) continue;
+        out.push({
+          time: Math.max(0, min * 60 + sec + frac),
+          text,
+        });
+      }
+      return out.sort((a, b) => a.time - b.time);
+    };
+    const parseTitleMeta = (raw = '') => {
+      const stripped = String(raw)
+        .split('|')[0]
+        .replace(/\((official|lyrics?|audio|video|hd)\)/gi, '')
+        .replace(/\[(official|lyrics?|audio|video|hd)\]/gi, '')
+        .trim();
+      const splitIdx = stripped.indexOf(' - ');
+      if (splitIdx === -1) return { parsedArtist: '', parsedTitle: stripped };
+      const left = stripped.slice(0, splitIdx).trim();
+      const right = stripped.slice(splitIdx + 3).trim();
+      return { parsedArtist: left, parsedTitle: right || stripped };
+    };
+    const isGenericArtistLabel = (value = '') => /(music|records|official|topic|ncs|vevo|channel|lyrics)/i.test(String(value));
+
+    const { parsedArtist, parsedTitle } = parseTitleMeta(title);
+    const wantedArtists = Array.from(new Set([
+      normalize(artist || ''),
+      normalize(parsedArtist || ''),
+    ].filter(Boolean)));
+    const preferredArtist = wantedArtists[0] || '';
+    const preferredParsedArtist = normalize(parsedArtist || '');
+    const providedArtistGeneric = isGenericArtistLabel(artist || '');
+    const wantedTitle = normalize(parsedTitle || title);
+    const rawTitle = String(title || '');
+    const titleVariants = Array.from(new Set([
+      rawTitle,
+      parsedTitle,
+      rawTitle.split(' - ').pop(),
+      rawTitle.split(' | ').shift(),
+      rawTitle.replace(/\(.*?\)|\[.*?\]/g, '').trim(),
+    ].map((t) => t && t.trim()).filter(Boolean)));
+
+    const reqs = [];
+    for (const variant of titleVariants) {
+      if (artist) {
+        reqs.push(
+          axios.get('https://lrclib.net/api/search', { params: { track_name: variant, artist_name: artist }, timeout: 10000 }),
+        );
+      }
+      if (parsedArtist && normalize(parsedArtist) !== normalize(artist || '')) {
+        reqs.push(
+          axios.get('https://lrclib.net/api/search', { params: { track_name: variant, artist_name: parsedArtist }, timeout: 10000 }),
+        );
+      }
+      reqs.push(
+        axios.get('https://lrclib.net/api/search', { params: { track_name: variant }, timeout: 10000 }),
+      );
+    }
+    reqs.push(axios.get('https://lrclib.net/api/search', { params: { q: artist ? `${artist} ${title}` : `${title}` }, timeout: 10000 }));
+    const responses = await Promise.allSettled(reqs);
+    const candidates = responses
+      .filter((r) => r.status === 'fulfilled')
+      .flatMap((r) => (Array.isArray(r.value.data) ? r.value.data : []));
+    const unique = [];
+    const seen = new Set();
+    for (const c of candidates) {
+      const key = `${normalize(c.artistName || c.artist || '')}::${normalize(c.trackName || c.name || '')}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(c);
+    }
+
+    const scored = unique
+      .map((c) => {
+        const cArtist = normalize(c.artistName || c.artist || '');
+        const cTitle = normalize(c.trackName || c.name || '');
+        const titleOverlap = overlapScore(cTitle, wantedTitle);
+        let score = 0;
+        for (const candidateArtist of wantedArtists) {
+          if (cArtist === candidateArtist) score += 4;
+          else if (candidateArtist && (cArtist.includes(candidateArtist) || candidateArtist.includes(cArtist))) score += 2;
+        }
+        if (cTitle === wantedTitle) score += 6;
+        else if (cTitle.includes(wantedTitle) || wantedTitle.includes(cTitle)) score += 3;
+        score += titleOverlap * 3;
+        if (titleOverlap < 0.35) score -= 2.5;
+        if (preferredParsedArtist && cArtist && overlapScore(cArtist, preferredParsedArtist) < 0.2) score -= 2;
+        if (providedArtistGeneric && preferredArtist && cArtist && overlapScore(cArtist, preferredArtist) < 0.2) score -= 1;
+        if (c.syncedLyrics) score += 1;
+        if (c.duration && c.duration > 30) score += 0.25;
+        return { c, score, titleOverlap };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    if (!scored.length || scored[0].score < 3.5) {
+      return res.status(404).json({ error: 'Lyrics not found' });
+    }
+    const best = scored[0]?.c;
+    let rawLyrics = best?.syncedLyrics || best?.plainLyrics || '';
+    if (!rawLyrics && artist) {
+      // Fallback for cases where LRCLIB has metadata hit but empty lyric fields
+      const fallback = await axios.get(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`, { timeout: 10000 });
+      rawLyrics = fallback.data?.lyrics || '';
+    }
+    if (!rawLyrics) return res.status(404).json({ error: 'Lyrics not found' });
+
+    const lines = rawLyrics
+      .replace(/\[\d{2}:\d{2}(?:\.\d{1,2})?\]/g, '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const synced = parseSyncedLyrics(rawLyrics);
+    res.json({
+      artist,
+      title,
+      lines,
+      lyrics: rawLyrics,
+      provider: best ? 'lrclib' : 'lyrics.ovh',
+      synced: synced.length > 0,
+      syncedLines: synced,
+      matchedArtist: best?.artistName || best?.artist || null,
+      matchedTitle: best?.trackName || best?.name || null,
+    });
+  } catch (err) {
+    res.status(404).json({ error: 'Lyrics not found' });
+  }
 });
 
 // --- ROUTES: READING SESSIONS & STATISTICS ---

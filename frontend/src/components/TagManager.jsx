@@ -44,7 +44,15 @@ export const TagBadge = ({ tag, onRemove, size = 'sm' }) => {
 };
 
 // Tag Selector Dropdown
-export const TagSelector = ({ contentType, contentId, selectedTags = [], onTagsChange, position = 'bottom' }) => {
+export const TagSelector = ({
+  contentType,
+  contentId,
+  selectedTags = [],
+  onTagsChange,
+  position = 'bottom',
+  buttonClassName = '',
+  iconSize = 14,
+}) => {
   const [isOpen, setIsOpen] = useState(false);
   const [allTags, setAllTags] = useState([]);
   const [currentTags, setCurrentTags] = useState(selectedTags);
@@ -152,10 +160,10 @@ export const TagSelector = ({ contentType, contentId, selectedTags = [], onTagsC
           e.stopPropagation();
           setIsOpen(!isOpen);
         }}
-        className="flex items-center gap-1 text-white/40 hover:text-primary transition-colors"
+        className={`flex items-center justify-center gap-1 transition-colors ${buttonClassName || 'text-white/40 hover:text-primary'}`}
         title="Manage tags"
       >
-        <Tag size={14} />
+        <Tag size={iconSize} />
       </button>
 
       {isOpen && (

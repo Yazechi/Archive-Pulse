@@ -18,6 +18,7 @@ const VideoPlayer = lazy(() => import('./pages/VideoPlayer'));
 const Activity = lazy(() => import('./pages/Activity'));
 const Stats = lazy(() => import('./pages/Stats'));
 const Downloads = lazy(() => import('./pages/Downloads'));
+const Favorites = lazy(() => import('./pages/Favorites'));
 
 function AppContent() {
   const { isMainPlayerExpanded, toggleMainPlayer } = useMusic();
@@ -85,6 +86,7 @@ function AppContent() {
               <Route path="/activity" element={<Activity />} />
               <Route path="/stats" element={<Stats />} />
               <Route path="/downloads" element={<Downloads />} />
+              <Route path="/favorites" element={<Favorites />} />
             </Routes>
           </Suspense>
         </div>

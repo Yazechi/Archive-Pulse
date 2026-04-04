@@ -11,6 +11,7 @@ const Videos = () => {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [duplicateIds, setDuplicateIds] = useState(new Set());
   const [searchLoading, setSearchLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('library'); // library, search
   const [searchType, setSearchType] = useState('anime'); // anime, movie
@@ -69,6 +70,19 @@ const Videos = () => {
         ? res.data
         : (res.data || []).filter((item) => item.source_provider === providerMap[selectedProvider]);
       setSearchResults(filtered);
+      const checks = await Promise.all(
+        (filtered || []).map(async (item) => {
+          try {
+            const dup = await axios.get(`${API_BASE}/api/duplicates/check`, {
+              params: { content_type: 'video', source_id: item.source_id || item.id, title: item.title }
+            });
+            return dup.data?.isDuplicate ? item.id : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      setDuplicateIds(new Set(checks.filter(Boolean)));
     } catch (err) {
       toast.error('Search failed');
     } finally {
@@ -78,6 +92,10 @@ const Videos = () => {
 
   const addToLibrary = async (video) => {
     try {
+      if (duplicateIds.has(video.id)) {
+        toast.warning('Already in archive');
+        return;
+      }
       await axios.post(`${API_BASE}/api/videos`, video);
       toast.success(`"${video.title}" added to archive`);
       fetchVideos();
@@ -287,9 +305,10 @@ const Videos = () => {
                       <div className="absolute bottom-4 left-4 right-4 flex gap-2">
                         <button
                           onClick={() => addToLibrary(video)}
-                          className="flex-1 btn-primary btn-sm justify-center"
+                          disabled={duplicateIds.has(video.id)}
+                          className={`flex-1 btn-sm justify-center ${duplicateIds.has(video.id) ? 'btn-secondary opacity-80 cursor-not-allowed' : 'btn-primary'}`}
                         >
-                          <Plus size={14} /> Add
+                          <Plus size={14} /> {duplicateIds.has(video.id) ? 'Exists' : 'Add'}
                         </button>
                       </div>
                     </div>
@@ -301,6 +320,9 @@ const Videos = () => {
                     <h3 className="text-sm font-semibold text-white truncate group-hover:text-primary transition-colors">
                       {video.title}
                     </h3>
+                    {duplicateIds.has(video.id) && (
+                      <p className="text-[10px] text-yellow-300">Duplicate in archive</p>
+                    )}
                     <p className="tech-label-sm">{video.release_year || video.releaseDate || 'Unknown'}</p>
                   </div>
                 </div>
@@ -348,7 +370,7 @@ const Videos = () => {
                   className={`absolute top-2 right-2 p-2 rounded-lg transition-all ${
                     favorites.has(video.id)
                       ? 'bg-red-500/20 text-red-500'
-                      : 'bg-black/50 text-white/50 opacity-0 group-hover:opacity-100'
+                      : 'bg-black/50 text-white/60 hover:text-red-400'
                   }`}
                 >
                   <Heart size={14} fill={favorites.has(video.id) ? 'currentColor' : 'none'} />

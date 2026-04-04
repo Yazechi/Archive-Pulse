@@ -224,6 +224,13 @@ const sampleBars = (arr, count) => {
   return result;
 };
 
+const roundBaseBandGain = (index, total) => {
+  const ratio = index / Math.max(1, total - 1);
+  if (ratio <= 0.3) return 2.15 - ratio * 1.2; // stronger low-end punch
+  if (ratio <= 0.72) return 1.2 - (ratio - 0.3) * 0.5; // slightly stronger mids
+  return 0.78 - (ratio - 0.72) * 0.25; // subtle highs
+};
+
 const mirroredIndexSample = (bars, i, count) => {
   const center = (count - 1) / 2;
   const dist = Math.abs(i - center) / Math.max(1, center); // 0 center -> 1 edges
@@ -762,348 +769,197 @@ const drawSemicircularVinylWrap = (ctx, payload) => {
   ctx.shadowBlur = 0;
 };
 
-// ==================== STYLE: ROUND BASE ====================
-// TrapNation-inspired: mirrored curved wings, RGB time-delayed layers,
-// beat-reactive global scale, and mirrored starfield drift.
-const roundBaseState = {
+// ==================== ROUND BASE (Trap Nation Style) ====================
+
+const roundBase = {
   history: [],
-  maxHistory: 6,
-  pushBars(bars) {
-    this.history.unshift([...bars]);
-    if (this.history.length > this.maxHistory) this.history.pop();
+  maxHistory: 8,
+  spectrumCount: 8,
+  exponents: [1, 1.12, 1.14, 1.30, 1.33, 1.36, 1.50, 1.52],
+  smoothMargins: [0, 2, 2, 3, 3, 3, 5, 5],
+  colors: ['#FFFFFF', '#FFFF00', '#FF0000', '#FF66FF', '#333399', '#0000FF', '#33CCFF', '#00FF00'],
+  delays: [0, 1, 2, 3, 4, 5, 6, 7],
+  push(spectrum) {
+    this.history.push(spectrum);
+    if (this.history.length > this.maxHistory) this.history.shift();
   },
-  delayed(delay) {
-    if (!this.history.length) return null;
-    return this.history[Math.min(delay, this.history.length - 1)];
-  },
-};
-
-const roundBaseStarfield = {
-  stars: [],
-  initialized: false,
-  dist: 256,
-  currentSpeed: 1,
-  targetSpeed: 1,
-  init(count = 420) {
-    if (this.initialized) return;
-    for (let i = 0; i < count; i += 1) {
-      this.stars.push({
-        x: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
-        y: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
-        z: ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist),
-        a: 0.2 + Math.random() * 0.45,
-      });
-    }
-    this.initialized = true;
-  },
-  update() {
-    this.currentSpeed += (this.targetSpeed - this.currentSpeed) * 0.1;
-    for (const s of this.stars) {
-      s.z -= this.currentSpeed;
-      s.x += 0.5 * Math.sin(s.z / 256);
-      s.y += 0.5 * Math.sin(s.z / 256);
-      if (s.z < -this.dist) {
-        s.z = this.dist;
-        s.x = -1 * Math.random() * this.dist;
-        s.y = ((Math.random() > 0.5 ? 1 : -1) * Math.random() * this.dist);
-      }
-    }
-  },
-  draw(ctx, width, height) {
-    for (const s of this.stars) {
-      if (s.z <= 0) continue;
-      const xp = width / 2 + (s.x * this.dist) / s.z;
-      const yp = height / 2 + (s.y * this.dist) / s.z;
-      if (xp < 0 || xp > width || yp < 0 || yp > height) continue;
-      const size = Math.max(0.5, 5 * (1 - s.z / this.dist));
-      ctx.fillStyle = `rgba(255,255,255,${s.a})`;
-      ctx.beginPath();
-      ctx.arc(xp, yp, size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(width - xp, yp, size, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  delayed(layer) {
+    const idx = Math.max(this.history.length - this.delays[layer] - 1, 0);
+    return this.history[idx] || null;
   },
 };
 
-const roundBaseBeat = {
-  previousScale: 1,
-  targetScale: 1,
-  currentScale: 1,
-  previousStarSpeed: 1,
-  targetStarSpeed: 1,
-  direction: 0,
-  falloff: 0,
-  lastTS: 0,
-  lowEma: 0,
-  beatScale: 1.32,
-  increaseDuration: 55,
-  stayDuration: 180,
-  decreaseDuration: 120,
-  update(deltaMS, lowBand) {
-    this.lowEma = this.lowEma * 0.9 + lowBand * 0.1;
-    const beatTriggered = lowBand > this.lowEma * 1.18 + 8;
-    if (beatTriggered) {
-      if (this.direction === 0 || this.direction === -1) {
-        this.direction = 1;
-        this.previousScale = this.currentScale;
-        this.targetScale = this.beatScale;
-        this.previousStarSpeed = roundBaseStarfield.currentSpeed;
-        this.targetStarSpeed = 5;
-        this.falloff = this.increaseDuration;
-      } else if (this.direction === 2) {
-        this.falloff = this.stayDuration;
-      }
-    }
-    if (this.falloff > 0 && this.direction !== 0) {
-      this.falloff -= deltaMS;
-      if (this.falloff <= 0) {
-        if (this.direction === 1) {
-          this.direction = 2;
-          this.previousScale = this.currentScale;
-          this.targetScale = this.currentScale;
-          this.previousStarSpeed = roundBaseStarfield.currentSpeed;
-          this.targetStarSpeed = roundBaseStarfield.currentSpeed;
-          this.falloff = this.stayDuration;
-        } else if (this.direction === 2) {
-          this.direction = -1;
-          this.previousScale = this.currentScale;
-          this.targetScale = 1;
-          this.previousStarSpeed = roundBaseStarfield.currentSpeed;
-          this.targetStarSpeed = 1;
-          this.falloff = this.decreaseDuration;
-        } else {
-          this.direction = 0;
-          this.previousScale = 1;
-          this.targetScale = 1;
-          this.previousStarSpeed = 1;
-          this.targetStarSpeed = 1;
-          this.falloff = 0;
-        }
-      }
-    }
-    if (this.falloff > 0) {
-      const duration = this.direction === 2 ? this.stayDuration
-        : this.direction === 1 ? this.increaseDuration
-          : this.decreaseDuration;
-      const t = Math.max(0, Math.min(1, (duration - this.falloff) / duration));
-      const smooth = t * t * (3 - 2 * t);
-      this.currentScale = this.previousScale + (this.targetScale - this.previousScale) * smooth;
-      roundBaseStarfield.targetSpeed = this.previousStarSpeed + (this.targetStarSpeed - this.previousStarSpeed) * smooth;
-    }
-    return this.currentScale;
-  },
-};
+const beat = {
+  scale: 1,
+  target: 1,
+  vel: 0,
+  energy: 0,
 
-// Cardinal spline curve drawing (like the reference's ctx.curve)
-const drawCardinalSpline = (ctx, points, tension = 0.5, closed = false, append = false) => {
-  if (points.length < 4) return;
-  
-  if (!append) {
-    ctx.beginPath();
+  update(bass) {
+    // smooth bass energy
+    this.energy = this.energy * 0.8 + bass * 0.2;
+
+    // kick detection
+    if (bass > this.energy * 1.3 && bass > 140) {
+      this.target = 1.25;
+      this.vel = 0.12;
+    } else {
+      this.target = 1;
+      this.vel = 0.06;
+    }
+
+    this.scale += (this.target - this.scale) * this.vel;
+    return this.scale;
   }
-  
-  const getPoint = (i) => {
-    if (closed) {
-      const idx = ((i % (points.length / 2)) + points.length / 2) % (points.length / 2);
-      return { x: points[idx * 2], y: points[idx * 2 + 1] };
-    }
-    const idx = Math.max(0, Math.min(points.length / 2 - 1, i));
-    return { x: points[idx * 2], y: points[idx * 2 + 1] };
-  };
-  
-  const numPoints = points.length / 2;
-  
-  for (let i = 0; i < numPoints - (closed ? 0 : 1); i++) {
-    const p0 = getPoint(i - 1);
-    const p1 = getPoint(i);
-    const p2 = getPoint(i + 1);
-    const p3 = getPoint(i + 2);
-    
-    if (i === 0) {
-      if (append) {
-        ctx.lineTo(p1.x, p1.y);
-      } else {
-      ctx.moveTo(p1.x, p1.y);
-      }
-    }
-    
-    const t1x = (p2.x - p0.x) * tension;
-    const t1y = (p2.y - p0.y) * tension;
-    const t2x = (p3.x - p1.x) * tension;
-    const t2y = (p3.y - p1.y) * tension;
-    
-    const steps = 12;
-    for (let step = 1; step <= steps; step++) {
-      const t = step / steps;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      
-      const h1 = 2 * t3 - 3 * t2 + 1;
-      const h2 = -2 * t3 + 3 * t2;
-      const h3 = t3 - 2 * t2 + t;
-      const h4 = t3 - t2;
-      
-      const x = h1 * p1.x + h2 * p2.x + h3 * t1x + h4 * t2x;
-      const y = h1 * p1.y + h2 * p2.y + h3 * t1y + h4 * t2y;
-      
-      ctx.lineTo(x, y);
-    }
-  }
-};
-
-const normalizeRoundBaseAmp = (value, maxLen, amplitudeMultiplier = 1) => {
-  const v = Math.max(0, Math.min(255, Number(value) || 0)) / 255;
-  return Math.pow(v, 0.75) * maxLen * amplitudeMultiplier;
 };
 
 const drawRoundBase = (ctx, payload) => {
   const {
-    width, height, bars, thumb, glowIntensity,
-    barHeightScale, vinylScale, primaryColor,
+    width, height,
+    bars,
+    thumb,
+    glowIntensity,
+    barHeightScale,
+    vinylScale,
+    bass,
+    beatPulse,
   } = payload;
+  const START_BIN = 8;
+  const KEEP_BINS = 40;
+  const SPECTRUM_HEIGHT_SCALAR = 0.35;
 
-  roundBaseStarfield.init(400);
-  roundBaseState.pushBars(bars);
-
-  const now = performance.now();
-  const deltaMS = roundBaseBeat.lastTS ? now - roundBaseBeat.lastTS : 16.67;
-  roundBaseBeat.lastTS = now;
-
-  const lowBand = ((bars[0] ?? 0) + (bars[1] ?? 0) + (bars[2] ?? 0) + (bars[3] ?? 0)) / 4;
-  const scaleFactor = roundBaseBeat.update(deltaMS, lowBand);
-
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(0, 0, width, height);
-
-  roundBaseStarfield.update();
-  roundBaseStarfield.draw(ctx, width, height);
-
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const base = Math.min(width, height);
-  const radius = base * 0.13 * vinylScale;
-  const maxLen = Math.max(10, base * 0.26 * barHeightScale);
-
-  const startFreq = 0;
-  const endFreq = Math.min(17, bars.length - 1);
-  const freqCount = endFreq - startFreq + 1;
-  const degToRad = (deg) => (deg * Math.PI) / 180;
-  const angle = 180 / (2 + freqCount);
-
-  const generateCurvePoints = (sourceBars, amplitudeMultiplier) => {
-    const points = [];
-    const mirrorPoints = [];
-
-    let idx = 0;
-    const x0 = radius * Math.cos(idx * degToRad(angle));
-    const y0 = radius * Math.sin(idx * degToRad(angle));
-    points.push(x0, y0);
-    mirrorPoints.push(x0, -y0);
-    idx++;
-    
-    for (let i = startFreq; i <= endFreq; i++) {
-      const rawValue = sourceBars?.[i] ?? 0;
-      const value = normalizeRoundBaseAmp(rawValue, maxLen, amplitudeMultiplier);
-      const xW = (radius + value) * Math.cos(idx * degToRad(angle));
-      const yW = (radius + value) * Math.sin(idx * degToRad(angle));
-      points.push(xW, yW);
-      mirrorPoints.push(xW, -yW);
-      idx++;
+  const transformSpectrum = (spectrum) => {
+    const slice = spectrum.slice(START_BIN, START_BIN + KEEP_BINS);
+    if (slice.length >= KEEP_BINS) return slice;
+    if (!slice.length) return new Array(KEEP_BINS).fill(0);
+    const filled = [...slice];
+    while (filled.length < KEEP_BINS) {
+      filled.push(filled[filled.length - 1]);
     }
-
-    const xF = radius * Math.cos(idx * degToRad(angle));
-    const yF = radius * Math.sin(idx * degToRad(angle));
-    points.push(xF, yF);
-    mirrorPoints.push(xF, -yF);
-
-    return { points, mirrorPoints };
+    return filled;
   };
 
-  const whiteBars = roundBaseState.delayed(0) ?? bars;
-  const redBars = roundBaseState.delayed(1) ?? whiteBars;
-  const blueBars = roundBaseState.delayed(2) ?? whiteBars;
-  const greenBars = roundBaseState.delayed(3) ?? whiteBars;
+  const catEarBoost = (ratio, kick) => {
+    // Boost around the top shoulder of the right arc; mirroring forms both ears.
+    const earCenter = 0.185;
+    const width = 0.08;
+    const dist = Math.abs(ratio - earCenter);
+    if (dist > width) return 1;
+    const curve = 1 - dist / width;
+    return 1 + curve * kick;
+  };
 
+  const bottomPointBoost = (ratio, kick) => {
+    const center = 0.985;
+    const width = 0.03;
+    const dist = Math.abs(ratio - center);
+    if (dist > width) return 1;
+    const curve = 1 - dist / width;
+    return 1 + curve * (0.45 + kick * 0.45);
+  };
+
+  const smoothArray = (arr, margin) => {
+    if (!margin) return arr;
+    const next = new Array(arr.length).fill(0);
+    for (let i = 0; i < arr.length; i += 1) {
+      let sum = 0;
+      let denom = 0;
+      for (let j = 0; j <= margin; j += 1) {
+        if (i - j < 0 || i + j >= arr.length) break;
+        sum += arr[i - j] + arr[i + j];
+        denom += (margin - j + 1) * 2;
+      }
+      next[i] = denom > 0 ? sum / denom : arr[i] || 0;
+    }
+    return next;
+  };
+
+  const drawMirroredCurveFill = (points, color) => {
+    if (!points.length) return;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 24 * glowIntensity;
+    const cx = width / 2;
+    const cy = height / 2;
+    ctx.beginPath();
+    for (let mirror = 0; mirror <= 1; mirror += 1) {
+      const xMult = mirror ? -1 : 1;
+      ctx.moveTo(cx, points[0].y + cy);
+      const len = points.length;
+      for (let i = 1; i < len - 2; i += 1) {
+        const c = xMult * (points[i].x + points[i + 1].x) / 2 + cx;
+        const d = (points[i].y + points[i + 1].y) / 2 + cy;
+        ctx.quadraticCurveTo(xMult * points[i].x + cx, points[i].y + cy, c, d);
+      }
+      ctx.quadraticCurveTo(
+        xMult * points[len - 2].x + cx + mirror * 2,
+        points[len - 2].y + cy,
+        xMult * points[len - 1].x + cx,
+        points[len - 1].y + cy
+      );
+    }
+    ctx.fill();
+    ctx.restore();
+  };
+
+  const cx = width / 2;
+  const cy = height / 2;
+  const base = Math.min(width, height);
+  const radius = base * (0.198 + Math.min(0.04, bass / 2500)) * vinylScale;
+  const pulse = beat.update(bass) * (1 + (beatPulse || 0) * 0.08);
+  const kickAmount = Math.min(0.56, (bass / 255) * 0.36 + (beatPulse || 0) * 0.48);
+  const transformed = transformSpectrum(bars);
+  roundBase.push(transformed);
+
+  for (let layer = roundBase.spectrumCount - 1; layer >= 0; layer -= 1) {
+    const delayed = roundBase.delayed(layer) || transformed;
+    const smoothed = smoothArray(delayed, roundBase.smoothMargins[layer]);
+    const points = [];
+    for (let i = 0; i < smoothed.length; i += 1) {
+      const t = Math.PI * (i / Math.max(1, smoothed.length - 1)) - Math.PI / 2;
+      const ratio = i / Math.max(1, smoothed.length - 1);
+      const normalized = Math.max(0, (smoothed[i] || 0) / 255);
+      const earScale = catEarBoost(ratio, kickAmount);
+      const bottomScale = bottomPointBoost(ratio, kickAmount);
+      const shaped = Math.min(
+        1.45,
+        normalized * roundBaseBandGain(i, smoothed.length) * earScale * bottomScale + (i > smoothed.length * 0.76 ? 0.02 : 0)
+      );
+      const amp = Math.pow(
+        shaped * SPECTRUM_HEIGHT_SCALAR * base * 0.235 * barHeightScale,
+        roundBase.exponents[layer]
+      );
+      const r = radius + amp * pulse;
+      points.push({ x: r * Math.cos(t), y: r * Math.sin(t) });
+    }
+    drawMirroredCurveFill(points, roundBase.colors[layer]);
+  }
+
+  // center disc + album art
   ctx.save();
-  ctx.translate(centerX, centerY);
-  ctx.scale(scaleFactor, scaleFactor);
-
-  ctx.save();
-  ctx.rotate(degToRad(-90));
-
-  if (scaleFactor > 1) {
-    const glowAlpha = Math.min(0.8, 0.35 * (scaleFactor - 1) * 3.2);
-    ctx.shadowColor = `rgba(255, 255, 255, ${glowAlpha})`;
-    ctx.shadowBlur = 5 * ((scaleFactor * 100) - 100) * glowIntensity;
-  }
-
-  const greenData = generateCurvePoints(greenBars, 1.7);
-  const blueData = generateCurvePoints(blueBars, 1.45);
-  const redData = generateCurvePoints(redBars, 1.2);
-  const whiteData = generateCurvePoints(whiteBars, 1.0);
-
-  if (greenData.points.length > 0) {
-    ctx.fillStyle = '#00ff00';
-    drawCardinalSpline(ctx, greenData.points, 0.5, false, false);
-    drawCardinalSpline(ctx, greenData.mirrorPoints, 0.5, false, true);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  if (blueData.points.length > 0) {
-    ctx.fillStyle = '#0000ff';
-    drawCardinalSpline(ctx, blueData.points, 0.5, false, false);
-    drawCardinalSpline(ctx, blueData.mirrorPoints, 0.5, false, true);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  if (redData.points.length > 0) {
-    ctx.fillStyle = '#ff0000';
-    drawCardinalSpline(ctx, redData.points, 0.5, false, false);
-    drawCardinalSpline(ctx, redData.mirrorPoints, 0.5, false, true);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  if (whiteData.points.length > 0) {
-    ctx.fillStyle = '#ffffff';
-    drawCardinalSpline(ctx, whiteData.points, 0.5, false, false);
-    drawCardinalSpline(ctx, whiteData.mirrorPoints, 0.5, false, true);
-    ctx.closePath();
-    ctx.fill();
-  }
-  ctx.restore();
-
+  ctx.translate(cx, cy);
+  const discR = radius * 1.02;
   ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
+  ctx.arc(0, 0, discR, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
   ctx.fill();
-
   if (thumb) {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(0, 0, radius * 0.92, 0, Math.PI * 2);
+    ctx.arc(0, 0, discR * 0.78, 0, Math.PI * 2);
     ctx.clip();
-    const thumbSize = radius * 1.84;
-    drawImageCover(ctx, thumb, -thumbSize / 2, -thumbSize / 2, thumbSize, thumbSize);
+    const size = discR * 1.56;
+    drawImageCover(ctx, thumb, -size / 2, -size / 2, size, size);
     ctx.restore();
+  } else {
+    ctx.beginPath();
+    ctx.arc(0, 0, discR * 0.78, 0, Math.PI * 2);
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fill();
   }
-
-  ctx.strokeStyle = toRgba(primaryColor, 0.4 * scaleFactor);
-  ctx.lineWidth = 2;
-  ctx.shadowBlur = 10 * glowIntensity * scaleFactor;
-  ctx.shadowColor = toRgba(primaryColor, 0.5);
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.stroke();
-
   ctx.restore();
-  ctx.shadowBlur = 0;
 };
-
 // ==================== STYLE: STACKED PILLARS ====================
 // Wide bottom bars with soft purple/blue gradient - pillar-like
 const drawStackedPillars = (ctx, payload) => {
@@ -2008,6 +1864,7 @@ export default function Visualizer({ analyser, thumbnailUrl, settings }) {
     const trailStrength = clamp(settings.trailStrength, 0, 0.9, 0.3);
     const spectralTilt = clamp(settings.spectralTilt, -1, 1, 0);
     const freqData = new Uint8Array(Math.max(128, safeFftSize / 2));
+    const timeData = new Uint8Array(Math.max(128, safeFftSize / 2));
 
     const draw = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -2033,6 +1890,7 @@ export default function Visualizer({ analyser, thumbnailUrl, settings }) {
         analyser.fftSize = safeFftSize;
         analyser.smoothingTimeConstant = safeSmoothing;
         analyser.getByteFrequencyData(freqData);
+        analyser.getByteTimeDomainData(timeData);
         // Calculate band energies using proper frequency ranges (Hz)
         // Bass: 20-250 Hz (kick drum, bass guitar, sub-bass)
         // Mid: 250-2000 Hz (vocals, guitars, piano - human ear most sensitive)
@@ -2124,6 +1982,7 @@ export default function Visualizer({ analyser, thumbnailUrl, settings }) {
         bloomStrength: glowSpread,
         trailStrength,
         beatPulse: beatPulseRef.current,
+        waveform: timeData,
       };
 
       switch (normalizedStyle) {

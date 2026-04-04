@@ -11,6 +11,7 @@ import {
   SkipForward,
   SlidersHorizontal,
   Volume2,
+  FileText,
 } from 'lucide-react';
 import { useMusic } from '../context/useMusic';
 import Visualizer from './visualizers/Visualizer';
@@ -250,12 +251,18 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
     canNext,
     playOrder,
     cyclePlayOrder,
+    lyrics,
+    lyricsLoading,
+    crossfadeSeconds,
+    setCrossfadeSeconds,
   } = useMusic();
 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
+  const [showLyrics, setShowLyrics] = useState(false);
+  const lyricsContainerRef = useRef(null);
   const leftOffset = isReaderPage || isMobile ? 0 : (isSidebarCollapsed ? 80 : 256);
 
   useEffect(() => {
@@ -277,6 +284,27 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
   const infoLayout = layoutForStyle(normalizedStyle);
   const orderMeta = ORDER_META[playOrder];
   const OrderIcon = orderMeta.icon;
+  const syncedLyrics = useMemo(
+    () => lyrics.filter((line) => line && typeof line === 'object' && Number.isFinite(line.time)),
+    [lyrics]
+  );
+  const activeLyricIndex = useMemo(() => {
+    if (!syncedLyrics.length) return -1;
+    let active = -1;
+    for (let i = 0; i < syncedLyrics.length; i += 1) {
+      if (currentTime >= syncedLyrics[i].time) active = i;
+      else break;
+    }
+    return active;
+  }, [currentTime, syncedLyrics]);
+
+  useEffect(() => {
+    if (!showLyrics || activeLyricIndex < 0 || !lyricsContainerRef.current) return;
+    const target = lyricsContainerRef.current.querySelector(`[data-lyric-index="${activeLyricIndex}"]`);
+    if (target) {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [activeLyricIndex, showLyrics]);
 
   const infoOverlay = useMemo(() => {
     const commonTitle = (
@@ -408,6 +436,13 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
               >
                 <SlidersHorizontal size={16} />
               </button>
+              <button
+                onClick={() => setShowLyrics((v) => !v)}
+                className={`p-2 rounded-lg border tap-press ${showLyrics ? 'border-primary text-primary' : 'border-white/10 text-white/70'}`}
+                title="Lyrics"
+              >
+                <FileText size={16} />
+              </button>
               <button onClick={() => toggleMainPlayer(false)} className="p-2 rounded-lg border border-white/10 text-white/70 tap-press">
                 <ChevronDown size={16} />
               </button>
@@ -447,6 +482,44 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
             {showSettings && (
               <aside className="absolute top-3 left-3 md:top-4 md:left-4 bottom-3 md:bottom-4 w-[calc(100%-24px)] md:w-[340px] rounded-2xl border border-white/10 bg-black/70 backdrop-blur-xl overflow-hidden animate-panel-right">
                 <VisualizerSettings settings={visualizerSettings} onChange={updateVisualizerSettings} onClose={() => setShowSettings(false)} />
+              </aside>
+            )}
+
+            {showLyrics && (
+              <aside className="absolute top-3 right-3 md:top-4 md:right-4 bottom-3 md:bottom-4 w-[calc(100%-24px)] md:w-[340px] rounded-2xl border border-white/10 bg-black/70 backdrop-blur-xl overflow-hidden animate-panel-left">
+                <div className="p-4 border-b border-white/10">
+                  <p className="text-sm font-semibold text-white">Lyrics</p>
+                  <p className="text-[10px] text-white/50 uppercase tracking-widest truncate">{currentTrack?.title}</p>
+                </div>
+                <div ref={lyricsContainerRef} className="h-[calc(100%-56px)] overflow-y-auto custom-scrollbar p-4 space-y-2">
+                  {lyricsLoading ? (
+                    <p className="tech-label">Fetching lyrics...</p>
+                  ) : lyrics.length === 0 ? (
+                    <p className="tech-label">No lyrics found for this track.</p>
+                  ) : syncedLyrics.length > 0 ? (
+                    lyrics.map((line, idx) => {
+                      if (!line?.text) return null;
+                      const isActive = idx === activeLyricIndex;
+                      return (
+                        <p
+                          key={`${idx}-${line.text.slice(0, 10)}`}
+                          data-lyric-index={idx}
+                          className={`text-sm leading-relaxed transition-colors ${
+                            isActive ? 'text-primary font-semibold' : 'text-white/65'
+                          }`}
+                        >
+                          {line.text}
+                        </p>
+                      );
+                    })
+                  ) : (
+                    lyrics.map((line, idx) => (
+                      <p key={`${idx}-${line.text?.slice(0, 10) || ''}`} className="text-sm text-white/80 leading-relaxed">
+                        {line.text}
+                      </p>
+                    ))
+                  )}
+                </div>
               </aside>
             )}
           </main>
@@ -503,6 +576,19 @@ export default function MusicPlayer({ isReaderPage = false, isSidebarCollapsed =
                 onChange={(event) => changeVolume(Number(event.target.value))}
                 className="w-28 md:w-44 accent-cyan-300"
               />
+              <div className="ml-3 flex items-center gap-2">
+                <span className="text-[10px] text-white/60 uppercase tracking-widest">Crossfade</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={12}
+                  step={1}
+                  value={crossfadeSeconds}
+                  onChange={(event) => setCrossfadeSeconds(Number(event.target.value))}
+                  className="w-24 md:w-32 accent-cyan-300"
+                />
+                <span className="text-[10px] text-white/60 w-7 text-right">{crossfadeSeconds}s</span>
+              </div>
               <button onClick={() => toggleMainPlayer(false)} className="ml-auto p-2 rounded-lg border border-white/10 text-white/70 hover:text-white tap-press">
                 <Maximize2 size={14} />
               </button>

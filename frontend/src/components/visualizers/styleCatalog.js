@@ -37,6 +37,8 @@ const LEGACY_STYLE_ALIASES = {
   prismPulseTunnel: 'pulse-frame',
   bar: 'bar',
   trapnation: 'round-base',
+  roundBase: 'round-base',
+  RoundBase: 'round-base',
   'neon-orbit': 'round-base',
   'round-base': 'round-base',
   semicircular: 'semicircular',

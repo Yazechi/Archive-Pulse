@@ -9,6 +9,7 @@ const Search = () => {
   const [type, setType] = useState('music');
   const [provider, setProvider] = useState('all');
   const [results, setResults] = useState([]);
+  const [duplicateIds, setDuplicateIds] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const { playTrack, toggleMainPlayer } = useMusic();
@@ -21,7 +22,27 @@ const Search = () => {
       const endpoint = searchType === 'music' ? '/api/music/search' : '/api/books/search';
       const q = searchQuery || (searchType === 'music' ? 'Top Hits' : 'Trending');
       const response = await axios.get(`http://127.0.0.1:5000${endpoint}?q=${encodeURIComponent(q)}&type=${searchType}&provider=${selectedProvider}`);
-      setResults(response.data);
+      const fetched = Array.isArray(response.data) ? response.data : [];
+      setResults(fetched);
+      const checks = await Promise.all(
+        fetched.map(async (item) => {
+          try {
+            const contentType = searchType === 'music' ? 'song' : 'book';
+            const dup = await axios.get('http://127.0.0.1:5000/api/duplicates/check', {
+              params: {
+                content_type: contentType,
+                source_id: searchType === 'music' ? item.id : undefined,
+                source_url: searchType !== 'music' ? item.source_url : undefined,
+                title: item.title,
+              },
+            });
+            return dup.data?.isDuplicate ? item.id : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      setDuplicateIds(new Set(checks.filter(Boolean)));
     } catch (err) { setError(`Registry Connection Error: ${err.message}`); } finally { setLoading(false); }
   };
 
@@ -38,6 +59,10 @@ const Search = () => {
 
   const addToCollection = async (item) => {
     try {
+      if (duplicateIds.has(item.id)) {
+        toast.warning(`"${item.title}" already exists in archive`);
+        return;
+      }
       const endpoint = type === 'music' ? '/api/songs/add' : '/api/books/add';
       const data = type === 'music' ? {
         title: item.title, artist: item.artist, source_id: item.id,
@@ -131,17 +156,26 @@ const Search = () => {
                 <div className="flex items-center gap-3">
                   <span className="tech-label text-primary/40">{item.source_name || 'Registry'}</span>
                   {item.duration && <span className="font-mono text-[9px] text-zinc-600">{item.duration}</span>}
+                  {duplicateIds.has(item.id) && (
+                    <span className="tech-label-sm text-yellow-300 border border-yellow-300/30 px-2 py-0.5 rounded-md">Duplicate</span>
+                  )}
                 </div>
                 <h3 className="text-xl text-white truncate font-display group-hover:text-primary transition-colors leading-none">{item.title}</h3>
                 <p className="tech-label-sm truncate">{type === 'music' ? item.artist : item.author}</p>
               </div>
 
-              <div className="flex gap-2">
-                {item.source_url && type !== 'music' && (
-                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="p-3 bg-white/5 rounded-xl text-white/20 hover:text-white hover:bg-white/10 transition-all"><ExternalLink size={20} /></a>
-                )}
-                <button onClick={() => addToCollection(item)} className="p-3 bg-white/5 rounded-xl text-white/20 hover:text-primary hover:bg-primary/10 transition-all"><Plus size={20} /></button>
-              </div>
+                <div className="flex gap-2">
+                  {item.source_url && type !== 'music' && (
+                    <a href={item.source_url} target="_blank" rel="noopener noreferrer" className="p-3 bg-white/5 rounded-xl text-white/20 hover:text-white hover:bg-white/10 transition-all"><ExternalLink size={20} /></a>
+                  )}
+                  <button
+                    onClick={() => addToCollection(item)}
+                    disabled={duplicateIds.has(item.id)}
+                    className={`p-3 rounded-xl transition-all ${duplicateIds.has(item.id) ? 'bg-yellow-500/10 text-yellow-300 cursor-not-allowed' : 'bg-white/5 text-white/20 hover:text-primary hover:bg-primary/10'}`}
+                  >
+                    <Plus size={20} />
+                  </button>
+                </div>
             </div>
           ))}
         </div>
