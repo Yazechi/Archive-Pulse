@@ -10,6 +10,7 @@ const axios = require('axios');
 const { EPub } = require('epub2');
 const AdmZip = require('adm-zip');
 const mm = require('music-metadata');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -279,6 +280,21 @@ const initDb = async () => {
       )
     `);
 
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL DEFAULT 'Primary Webhook',
+        url TEXT NOT NULL,
+        secret VARCHAR(255) NULL,
+        enabled BOOLEAN DEFAULT TRUE,
+        events JSON NULL,
+        last_status VARCHAR(32) NULL,
+        last_error TEXT NULL,
+        last_triggered_at TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Enhanced book_highlights with notes
     try { await conn.query('ALTER TABLE book_highlights ADD COLUMN note TEXT AFTER color'); } catch (e) {}
     
@@ -322,6 +338,222 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 }));
 
 // --- HELPERS ---
+
+const WEBHOOK_EVENT_OPTIONS = [
+  'library.song_added',
+  'library.book_added',
+  'library.video_added',
+  'download.completed',
+  'download.failed',
+  'import.spotify_completed',
+  'test.ping',
+  '*'
+];
+
+const normalizeWebhookEvents = (events) => {
+  const incoming = Array.isArray(events) ? events : [];
+  const normalized = incoming
+    .map((evt) => String(evt || '').trim())
+    .filter(Boolean)
+    .filter((evt) => WEBHOOK_EVENT_OPTIONS.includes(evt));
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : ['*'];
+};
+
+const parseWebhookEvents = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+};
+
+const buildWebhookPayload = (eventName, payload) => ({
+  event: eventName,
+  timestamp: new Date().toISOString(),
+  payload
+});
+
+const dispatchWebhookEvent = async (eventName, payload, { subscriptionId = null } = {}) => {
+  try {
+    let query = 'SELECT * FROM webhook_subscriptions WHERE enabled = TRUE';
+    const params = [];
+    if (subscriptionId) {
+      query += ' AND id = ?';
+      params.push(subscriptionId);
+    }
+    const [rows] = await pool.query(query, params);
+    const webhookBody = buildWebhookPayload(eventName, payload);
+    const bodyString = JSON.stringify(webhookBody);
+
+    for (const row of rows) {
+      const configuredEvents = normalizeWebhookEvents(parseWebhookEvents(row.events));
+      if (!configuredEvents.includes('*') && !configuredEvents.includes(eventName)) {
+        continue;
+      }
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-Archive-Event': eventName,
+        'User-Agent': 'ArchivePulse-Webhook/1.0'
+      };
+      if (row.secret) {
+        headers['X-Archive-Signature'] = crypto
+          .createHmac('sha256', row.secret)
+          .update(bodyString)
+          .digest('hex');
+      }
+
+      try {
+        await axios.post(row.url, webhookBody, { headers, timeout: 8000 });
+        await pool.query(
+          'UPDATE webhook_subscriptions SET last_status = ?, last_error = NULL, last_triggered_at = NOW() WHERE id = ?',
+          ['success', row.id]
+        );
+      } catch (err) {
+        await pool.query(
+          'UPDATE webhook_subscriptions SET last_status = ?, last_error = ?, last_triggered_at = NOW() WHERE id = ?',
+          ['failed', err.message, row.id]
+        );
+        console.error(`Webhook dispatch failed for subscription ${row.id}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('Webhook dispatch failure:', err.message);
+  }
+};
+
+let spotifyTokenCache = { token: null, expiresAt: 0 };
+
+const getSpotifyAccessToken = async () => {
+  if (spotifyTokenCache.token && spotifyTokenCache.expiresAt > Date.now()) {
+    return spotifyTokenCache.token;
+  }
+  const clientId = process.env.SPOTIFY_CLIENT_ID;
+  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error('Spotify credentials are missing. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.');
+  }
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const body = new URLSearchParams({ grant_type: 'client_credentials' });
+  const response = await axios.post('https://accounts.spotify.com/api/token', body.toString(), {
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    timeout: 10000
+  });
+  const token = response.data?.access_token;
+  const expiresIn = Number(response.data?.expires_in || 3600);
+  if (!token) throw new Error('Failed to get Spotify access token.');
+  spotifyTokenCache = {
+    token,
+    expiresAt: Date.now() + Math.max(60, expiresIn - 60) * 1000
+  };
+  return token;
+};
+
+const spotifyDuration = (durationMs) => {
+  const totalSec = Math.max(0, Math.round((Number(durationMs) || 0) / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${String(sec).padStart(2, '0')}`;
+};
+
+const parseSpotifySource = (rawUrl) => {
+  const input = String(rawUrl || '').trim();
+  const match = input.match(/spotify\.com\/(playlist|track|album)\/([A-Za-z0-9]+)/i);
+  if (!match) throw new Error('Unsupported Spotify URL. Use track, album, or playlist link.');
+  return { type: match[1].toLowerCase(), id: match[2] };
+};
+
+const fetchSpotifyItems = async (url) => {
+  const { type, id } = parseSpotifySource(url);
+  const token = await getSpotifyAccessToken();
+  const headers = { Authorization: `Bearer ${token}` };
+  const tracks = [];
+  let sourceTitle = 'Spotify';
+
+  if (type === 'track') {
+    const { data } = await axios.get(`https://api.spotify.com/v1/tracks/${id}`, { headers, timeout: 10000 });
+    tracks.push({
+      title: data.name,
+      artist: (data.artists || []).map((a) => a.name).join(', ') || 'Unknown',
+      duration: spotifyDuration(data.duration_ms),
+      spotify_url: data.external_urls?.spotify || null
+    });
+    sourceTitle = data.name || sourceTitle;
+  } else if (type === 'album') {
+    const { data: album } = await axios.get(`https://api.spotify.com/v1/albums/${id}`, { headers, timeout: 10000 });
+    sourceTitle = album.name || sourceTitle;
+    (album.tracks?.items || []).forEach((track) => {
+      tracks.push({
+        title: track.name,
+        artist: (track.artists || []).map((a) => a.name).join(', ') || 'Unknown',
+        duration: spotifyDuration(track.duration_ms),
+        spotify_url: track.external_urls?.spotify || null
+      });
+    });
+  } else if (type === 'playlist') {
+    const { data: playlist } = await axios.get(`https://api.spotify.com/v1/playlists/${id}`, {
+      headers,
+      timeout: 10000,
+      params: { fields: 'name,tracks.total' }
+    });
+    sourceTitle = playlist.name || sourceTitle;
+    let offset = 0;
+    const total = Number(playlist.tracks?.total || 0);
+    while (offset < total) {
+      const { data } = await axios.get(`https://api.spotify.com/v1/playlists/${id}/tracks`, {
+        headers,
+        timeout: 10000,
+        params: { offset, limit: 100, fields: 'items(track(name,artists(name),duration_ms,external_urls))' }
+      });
+      const items = data.items || [];
+      items.forEach((item) => {
+        const track = item.track;
+        if (!track?.name) return;
+        tracks.push({
+          title: track.name,
+          artist: (track.artists || []).map((a) => a.name).join(', ') || 'Unknown',
+          duration: spotifyDuration(track.duration_ms),
+          spotify_url: track.external_urls?.spotify || null
+        });
+      });
+      if (items.length === 0) break;
+      offset += items.length;
+    }
+  }
+
+  return { type, sourceTitle, tracks };
+};
+
+const searchYouTubeSingle = async (query) => {
+  try {
+    const output = await youtubedl(`ytsearch1:${query}`, {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      noWarnings: true,
+      quiet: true
+    });
+    const entry = output?.entries?.[0] || output;
+    if (!entry?.id) return null;
+    return {
+      id: entry.id,
+      title: entry.title,
+      artist: entry.uploader || 'YouTube',
+      duration: entry.duration ? `${Math.floor(entry.duration / 60)}:${String(entry.duration % 60).padStart(2, '0')}` : 'N/A',
+      thumbnail_url: `https://i.ytimg.com/vi/${entry.id}/mqdefault.jpg`,
+      source: 'youtube'
+    };
+  } catch {
+    return null;
+  }
+};
 
 const extractMusicMetadata = async (filePath) => {
   try {
@@ -832,6 +1064,230 @@ app.get('/api/stats', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/stats/listening-history', async (req, res) => {
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days || 30)));
+  try {
+    const [rows] = await pool.query(`
+      SELECT DATE(created_at) as date, COUNT(*) as plays
+      FROM activity_log
+      WHERE content_type = 'song'
+        AND action_type = 'play'
+        AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `, [days]);
+
+    const playMap = new Map(rows.map((r) => [String(r.date), Number(r.plays || 0)]));
+    const timeline = [];
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+    for (let i = 0; i < days; i++) {
+      const point = new Date(start);
+      point.setDate(start.getDate() + i);
+      const key = point.toISOString().slice(0, 10);
+      timeline.push({
+        date: key,
+        plays: playMap.get(key) || 0
+      });
+    }
+
+    res.json({
+      days,
+      totalPlays: timeline.reduce((acc, row) => acc + row.plays, 0),
+      timeline
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/reading-streak', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT DISTINCT DATE(start_time) as date
+      FROM reading_sessions
+      ORDER BY date DESC
+    `);
+    const daySet = new Set(rows.map((r) => String(r.date)));
+    const toIsoDate = (value) => value.toISOString().slice(0, 10);
+
+    let currentStreak = 0;
+    const startDate = new Date();
+    startDate.setHours(0, 0, 0, 0);
+    const todayKey = toIsoDate(startDate);
+    if (!daySet.has(todayKey)) {
+      startDate.setDate(startDate.getDate() - 1);
+    }
+    while (daySet.has(toIsoDate(startDate))) {
+      currentStreak++;
+      startDate.setDate(startDate.getDate() - 1);
+    }
+
+    const ascDates = rows.map((r) => new Date(r.date)).sort((a, b) => a - b);
+    let bestStreak = 0;
+    let running = 0;
+    let prevDate = null;
+    for (const date of ascDates) {
+      const current = new Date(date);
+      current.setHours(0, 0, 0, 0);
+      if (!prevDate) {
+        running = 1;
+      } else {
+        const diffDays = Math.round((current - prevDate) / 86400000);
+        running = diffDays === 1 ? running + 1 : 1;
+      }
+      bestStreak = Math.max(bestStreak, running);
+      prevDate = current;
+    }
+
+    res.json({
+      currentStreak,
+      bestStreak,
+      lastReadDate: rows[0]?.date || null,
+      activeDays: rows.length
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/library-breakdown', async (req, res) => {
+  try {
+    const [songBySource] = await pool.query(`
+      SELECT source, COUNT(*) as count
+      FROM songs
+      GROUP BY source
+    `);
+    const [bookByType] = await pool.query(`
+      SELECT type, COUNT(*) as count
+      FROM books
+      GROUP BY type
+    `);
+    const [bookBySource] = await pool.query(`
+      SELECT source, COUNT(*) as count
+      FROM books
+      GROUP BY source
+    `);
+    const [videoByType] = await pool.query(`
+      SELECT type, COUNT(*) as count
+      FROM videos
+      GROUP BY type
+    `);
+    const [completion] = await pool.query(`
+      SELECT
+        SUM(CASE WHEN progress >= 100 THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN progress > 0 AND progress < 100 THEN 1 ELSE 0 END) as in_progress,
+        SUM(CASE WHEN progress = 0 OR progress IS NULL THEN 1 ELSE 0 END) as not_started
+      FROM books
+    `);
+    const [libraryTotals] = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM songs) as songs,
+        (SELECT COUNT(*) FROM books) as books,
+        (SELECT COUNT(*) FROM videos) as videos,
+        (SELECT COUNT(*) FROM playlists) as playlists,
+        (SELECT COUNT(*) FROM series) as series
+    `);
+
+    const rowToMap = (rows, keyField = 'source') => rows.reduce((acc, row) => {
+      acc[row[keyField] || 'unknown'] = Number(row.count || 0);
+      return acc;
+    }, {});
+
+    res.json({
+      totals: libraryTotals[0] || {},
+      songsBySource: rowToMap(songBySource, 'source'),
+      booksByType: rowToMap(bookByType, 'type'),
+      booksBySource: rowToMap(bookBySource, 'source'),
+      videosByType: rowToMap(videoByType, 'type'),
+      readingProgress: {
+        completed: Number(completion[0]?.completed || 0),
+        inProgress: Number(completion[0]?.in_progress || 0),
+        notStarted: Number(completion[0]?.not_started || 0)
+      }
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/genre-breakdown', async (req, res) => {
+  try {
+    const [tagRows] = await pool.query(`
+      SELECT
+        t.id,
+        t.name,
+        t.color,
+        SUM(CASE WHEN ct.content_type = 'song' THEN 1 ELSE 0 END) as songs,
+        SUM(CASE WHEN ct.content_type = 'book' THEN 1 ELSE 0 END) as books,
+        SUM(CASE WHEN ct.content_type = 'video' THEN 1 ELSE 0 END) as videos,
+        COUNT(*) as total
+      FROM content_tags ct
+      JOIN tags t ON t.id = ct.tag_id
+      GROUP BY t.id, t.name, t.color
+      ORDER BY total DESC
+    `);
+    const [videoRows] = await pool.query(`
+      SELECT genres
+      FROM videos
+      WHERE genres IS NOT NULL AND TRIM(genres) <> ''
+    `);
+
+    const genreMap = new Map();
+    const mergeGenre = (name, partial) => {
+      const key = String(name || '').trim().toLowerCase();
+      if (!key) return;
+      const existing = genreMap.get(key) || {
+        name: name.trim(),
+        color: '#00f2ff',
+        songs: 0,
+        books: 0,
+        videos: 0,
+        total: 0
+      };
+      existing.songs += Number(partial.songs || 0);
+      existing.books += Number(partial.books || 0);
+      existing.videos += Number(partial.videos || 0);
+      existing.total += Number(partial.total || 0);
+      if (partial.color) existing.color = partial.color;
+      genreMap.set(key, existing);
+    };
+
+    tagRows.forEach((row) => mergeGenre(row.name, row));
+    videoRows.forEach((row) => {
+      String(row.genres || '')
+        .split(',')
+        .map((g) => g.trim())
+        .filter(Boolean)
+        .forEach((genre) => mergeGenre(genre, { videos: 1, total: 1 }));
+    });
+
+    const genres = Array.from(genreMap.values())
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 20);
+
+    res.json({ genres });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/stats/downloads-summary', async (req, res) => {
+  try {
+    const [queueSummary] = await pool.query(`
+      SELECT
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status IN ('pending', 'downloading') THEN 1 ELSE 0 END) as active,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+      FROM downloads
+    `);
+    const [lifetime] = await pool.query(`
+      SELECT COUNT(*) as lifetime_downloads
+      FROM activity_log
+      WHERE action_type = 'download'
+    `);
+    res.json({
+      completed: Number(queueSummary[0]?.completed || 0),
+      active: Number(queueSummary[0]?.active || 0),
+      failed: Number(queueSummary[0]?.failed || 0),
+      lifetimeDownloads: Number(lifetime[0]?.lifetime_downloads || 0)
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- ROUTES: MUSIC ---
 
 app.get('/api/songs', async (req, res) => {
@@ -848,6 +1304,7 @@ app.post('/api/songs/add', async (req, res) => {
       'INSERT INTO songs (title, artist, source_id, thumbnail_url, source, duration) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE title=VALUES(title)',
       [title, artist, source_id, thumbnail_url, source, duration]
     );
+    await dispatchWebhookEvent('library.song_added', { title, artist, source: source || 'youtube', source_id });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -875,7 +1332,8 @@ const createSongFromUpload = async (file, { title, artist } = {}) => {
 app.post('/api/upload/music', upload.single('music'), async (req, res) => {
   try {
     const { title, artist } = req.body;
-    await createSongFromUpload(req.file, { title, artist });
+    const created = await createSongFromUpload(req.file, { title, artist });
+    await dispatchWebhookEvent('library.song_added', { title: created.title, artist: created.artist, source: 'local' });
     res.json({ success: true });
   } catch (err) { 
     console.error('Music upload error:', err.message);
@@ -901,6 +1359,9 @@ app.post('/api/upload/music/bulk', upload.array('music_files', 100), async (req,
     }
     const successCount = results.filter((r) => r.status === 'success').length;
     const failedCount = results.length - successCount;
+    if (successCount > 0) {
+      await dispatchWebhookEvent('library.song_added', { source: 'local', count: successCount, bulk: true });
+    }
     res.status(failedCount > 0 ? 207 : 200).json({
       success: failedCount === 0,
       successCount,
@@ -974,6 +1435,75 @@ app.get('/api/music/search', async (req, res) => {
   };
 
   runSearch();
+});
+
+app.post('/api/spotify/import', async (req, res) => {
+  const { url, auto_add = true, limit = 50 } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'Spotify URL is required' });
+  try {
+    const parsedLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+    const spotifyData = await fetchSpotifyItems(url);
+    const tracks = (spotifyData.tracks || []).slice(0, parsedLimit);
+    if (tracks.length === 0) {
+      return res.status(404).json({ error: 'No tracks found from Spotify source' });
+    }
+
+    if (!auto_add) {
+      return res.json({
+        success: true,
+        sourceType: spotifyData.type,
+        sourceTitle: spotifyData.sourceTitle,
+        totalTracks: tracks.length,
+        tracks
+      });
+    }
+
+    const imported = [];
+    const failed = [];
+    for (const track of tracks) {
+      const query = `${track.title} ${track.artist} audio`;
+      const mapped = await searchYouTubeSingle(query);
+      if (!mapped) {
+        failed.push({ track, reason: 'No YouTube match found' });
+        continue;
+      }
+      try {
+        await pool.query(
+          'INSERT INTO songs (title, artist, source_id, thumbnail_url, source, duration) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE title=VALUES(title)',
+          [mapped.title, mapped.artist, mapped.id, mapped.thumbnail_url, mapped.source, mapped.duration]
+        );
+        imported.push({
+          title: mapped.title,
+          artist: mapped.artist,
+          source_id: mapped.id,
+          duration: mapped.duration,
+          spotify_url: track.spotify_url
+        });
+      } catch (err) {
+        failed.push({ track, reason: err.message });
+      }
+    }
+
+    await dispatchWebhookEvent('import.spotify_completed', {
+      sourceTitle: spotifyData.sourceTitle,
+      sourceType: spotifyData.type,
+      importedCount: imported.length,
+      failedCount: failed.length
+    });
+
+    res.json({
+      success: true,
+      sourceType: spotifyData.type,
+      sourceTitle: spotifyData.sourceTitle,
+      requested: tracks.length,
+      importedCount: imported.length,
+      failedCount: failed.length,
+      imported: imported.slice(0, 30),
+      failed: failed.slice(0, 30)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/api/songs/:id', async (req, res) => {
@@ -1114,6 +1644,7 @@ app.post('/api/books/add', async (req, res) => {
       'INSERT INTO books (title, author, thumbnail_url, source, source_url, type) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE title=VALUES(title)',
       [title, author, thumbnail_url, source, source_url, type || 'book']
     );
+    await dispatchWebhookEvent('library.book_added', { title, author, type: type || 'book', source: source || 'external' });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1168,7 +1699,12 @@ const createBookFromUpload = async (file, payload = {}) => {
 
 app.post('/api/upload/book', upload.single('book'), async (req, res) => {
   try {
-    await createBookFromUpload(req.file, req.body);
+    const created = await createBookFromUpload(req.file, req.body);
+    await dispatchWebhookEvent('library.book_added', {
+      title: created.title,
+      type: req.body?.type || 'book',
+      source: 'local'
+    });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1197,6 +1733,9 @@ app.post('/api/upload/book/bulk', upload.array('book_files', 100), async (req, r
     }
     const successCount = results.filter((r) => r.status === 'success').length;
     const failedCount = results.length - successCount;
+    if (successCount > 0) {
+      await dispatchWebhookEvent('library.book_added', { source: 'local', count: successCount, bulk: true, type: type || 'book' });
+    }
     res.status(failedCount > 0 ? 207 : 200).json({
       success: failedCount === 0,
       successCount,
@@ -1911,6 +2450,70 @@ app.get('/api/tags/:tagId/content', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- ROUTES: WEBHOOK SUBSCRIPTIONS ---
+
+app.get('/api/webhooks/subscriptions', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT id, name, url, enabled, events, last_status, last_error, last_triggered_at, created_at
+      FROM webhook_subscriptions
+      ORDER BY id ASC
+    `);
+    res.json(
+      rows.map((row) => ({
+        ...row,
+        events: normalizeWebhookEvents(parseWebhookEvents(row.events))
+      }))
+    );
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/webhooks/subscriptions', async (req, res) => {
+  const { name, url, secret = null, enabled = true, events = ['*'] } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'Webhook URL is required' });
+  try {
+    const normalizedEvents = normalizeWebhookEvents(events);
+    const [result] = await pool.query(
+      'INSERT INTO webhook_subscriptions (name, url, secret, enabled, events) VALUES (?, ?, ?, ?, ?)',
+      [name || 'Primary Webhook', String(url).trim(), secret || null, Boolean(enabled), JSON.stringify(normalizedEvents)]
+    );
+    res.status(201).json({ id: result.insertId, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/webhooks/subscriptions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, url, secret, enabled, events } = req.body || {};
+  try {
+    const updates = [];
+    const params = [];
+    if (name !== undefined) { updates.push('name = ?'); params.push(name || 'Primary Webhook'); }
+    if (url !== undefined) { updates.push('url = ?'); params.push(String(url || '').trim()); }
+    if (secret !== undefined) { updates.push('secret = ?'); params.push(secret || null); }
+    if (enabled !== undefined) { updates.push('enabled = ?'); params.push(Boolean(enabled)); }
+    if (events !== undefined) { updates.push('events = ?'); params.push(JSON.stringify(normalizeWebhookEvents(events))); }
+    if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
+    params.push(id);
+    await pool.query(`UPDATE webhook_subscriptions SET ${updates.join(', ')} WHERE id = ?`, params);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/webhooks/subscriptions/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM webhook_subscriptions WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/webhooks/test', async (req, res) => {
+  const { subscription_id } = req.body || {};
+  try {
+    await dispatchWebhookEvent('test.ping', { message: 'Archive Pulse test webhook' }, { subscriptionId: subscription_id || null });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- ROUTES: ACTIVITY LOG / WATCH HISTORY ---
 
 app.get('/api/activity', async (req, res) => {
@@ -2052,6 +2655,7 @@ app.post('/api/videos', async (req, res) => {
       [title, original_title, type || 'movie', source || 'external', source_id, source_provider,
        thumbnail_url, backdrop_url, description, release_year, duration, rating, genres, total_episodes || 1]
     );
+    await dispatchWebhookEvent('library.video_added', { title, type: type || 'movie', source_provider });
     res.status(201).json({ id: result.insertId || result.affectedRows, success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2757,24 +3361,35 @@ app.get('/api/stats/reading', async (req, res) => {
       ORDER BY date DESC
     `);
     
+    const dates = streakData.map((r) => new Date(r.date)).sort((a, b) => b - a);
+    const toIsoDate = (value) => value.toISOString().slice(0, 10);
+    const dateSet = new Set(dates.map((d) => toIsoDate(d)));
+
     let currentStreak = 0;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    for (let i = 0; i < streakData.length; i++) {
-      const sessionDate = new Date(streakData[i].date);
-      sessionDate.setHours(0, 0, 0, 0);
-      const expectedDate = new Date(today);
-      expectedDate.setDate(expectedDate.getDate() - i);
-      
-      if (sessionDate.getTime() === expectedDate.getTime()) {
-        currentStreak++;
-      } else if (i === 0 && sessionDate.getTime() === expectedDate.getTime() - 86400000) {
-        // Allow for "yesterday" to still count
-        currentStreak++;
+    const streakAnchor = new Date();
+    streakAnchor.setHours(0, 0, 0, 0);
+    const todayKey = toIsoDate(streakAnchor);
+    if (!dateSet.has(todayKey)) streakAnchor.setDate(streakAnchor.getDate() - 1);
+    while (dateSet.has(toIsoDate(streakAnchor))) {
+      currentStreak++;
+      streakAnchor.setDate(streakAnchor.getDate() - 1);
+    }
+
+    const ascDates = [...dates].sort((a, b) => a - b);
+    let bestStreak = 0;
+    let runningStreak = 0;
+    let previousDate = null;
+    for (const date of ascDates) {
+      const currentDate = new Date(date);
+      currentDate.setHours(0, 0, 0, 0);
+      if (!previousDate) {
+        runningStreak = 1;
       } else {
-        break;
+        const diffDays = Math.round((currentDate - previousDate) / 86400000);
+        runningStreak = diffDays === 1 ? runningStreak + 1 : 1;
       }
+      bestStreak = Math.max(bestStreak, runningStreak);
+      previousDate = currentDate;
     }
     
     // Average session length
@@ -2802,6 +3417,8 @@ app.get('/api/stats/reading', async (req, res) => {
       dailyReading,
       booksCompleted: booksCompleted[0]?.count || 0,
       currentStreak,
+      bestStreak,
+      lastReadDate: streakData[0]?.date || null,
       avgSessionSeconds: Math.round(avgSession[0]?.avg_seconds || 0),
       avgPagesPerSession: Math.round(avgSession[0]?.avg_pages || 0),
       topBooks
@@ -3203,6 +3820,13 @@ async function processMangaChapterDownload(download) {
           'UPDATE downloads SET status = "completed", progress = 100, completed_at = NOW() WHERE id = ?',
           [downloadId]
         );
+        await dispatchWebhookEvent('download.completed', {
+          download_id: downloadId,
+          title: download.title,
+          content_type: download.content_type,
+          content_id: download.content_id,
+          skipped_existing: true
+        });
         activeDownloads.delete(downloadId);
         return;
       }
@@ -3299,6 +3923,12 @@ async function processMangaChapterDownload(download) {
       'UPDATE downloads SET status = "completed", progress = 100, downloaded_bytes = ?, total_bytes = ?, completed_at = NOW() WHERE id = ?',
       [downloadedBytes, downloadedBytes, downloadId]
     );
+    await dispatchWebhookEvent('download.completed', {
+      download_id: downloadId,
+      title: download.title,
+      content_type: download.content_type,
+      content_id: download.content_id
+    });
     activeDownloads.delete(downloadId);
     
   } catch (err) {
@@ -3307,6 +3937,13 @@ async function processMangaChapterDownload(download) {
       'UPDATE downloads SET status = "failed", error_message = ? WHERE id = ?',
       [err.message, downloadId]
     );
+    await dispatchWebhookEvent('download.failed', {
+      download_id: downloadId,
+      title: download.title,
+      content_type: download.content_type,
+      content_id: download.content_id,
+      error: err.message
+    });
     activeDownloads.delete(downloadId);
   }
 }

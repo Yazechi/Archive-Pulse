@@ -7,10 +7,47 @@ import {
 
 const API_BASE = 'http://127.0.0.1:5000';
 
+const buildLibraryBreakdownFromCollections = (songs = [], books = [], videos = []) => {
+  const toCountMap = (rows, field) =>
+    rows.reduce((acc, row) => {
+      const key = row?.[field] || 'unknown';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+  const readingProgress = books.reduce(
+    (acc, row) => {
+      const progress = Number(row?.progress || 0);
+      if (progress >= 100) acc.completed += 1;
+      else if (progress > 0) acc.inProgress += 1;
+      else acc.notStarted += 1;
+      return acc;
+    },
+    { completed: 0, inProgress: 0, notStarted: 0 }
+  );
+
+  return {
+    totals: {
+      songs: songs.length,
+      books: books.length,
+      videos: videos.length
+    },
+    songsBySource: toCountMap(songs, 'source'),
+    booksByType: toCountMap(books, 'type'),
+    booksBySource: toCountMap(books, 'source'),
+    videosByType: toCountMap(videos, 'type'),
+    readingProgress
+  };
+};
+
 const Stats = () => {
   const [readingStats, setReadingStats] = useState(null);
   const [activityStats, setActivityStats] = useState(null);
   const [generalStats, setGeneralStats] = useState(null);
+  const [listeningHistory, setListeningHistory] = useState({ timeline: [], totalPlays: 0 });
+  const [readingStreak, setReadingStreak] = useState({ currentStreak: 0, bestStreak: 0, activeDays: 0 });
+  const [libraryBreakdown, setLibraryBreakdown] = useState(null);
+  const [genreBreakdown, setGenreBreakdown] = useState({ genres: [] });
   const [playCountStats, setPlayCountStats] = useState({ totalPlays: 0, totalSongsPlayed: 0, topSongs: [] });
   const [favoritesStats, setFavoritesStats] = useState({ total: 0, songs: 0, books: 0, videos: 0 });
   const [downloadsStats, setDownloadsStats] = useState({ active: 0, completed: 0, failed: 0 });
@@ -22,7 +59,24 @@ const Stats = () => {
     const fetchStats = async () => {
       setLoading(true);
       try {
-        const [readingRes, activityRes, generalRes, favoritesRes, downloadsRes, annotationsRes, playCountsRes] = await Promise.all([
+        const [
+          readingRes,
+          activityRes,
+          generalRes,
+          favoritesRes,
+          downloadsRes,
+          annotationsRes,
+          playCountsRes,
+          listeningHistoryRes,
+          readingStreakRes,
+          libraryBreakdownRes,
+          genreBreakdownRes,
+          downloadSummaryRes,
+          songsRes,
+          booksRes,
+          videosRes,
+          tagsRes
+        ] = await Promise.all([
           axios.get(`${API_BASE}/api/stats/reading?days=${timeRange}`),
           axios.get(`${API_BASE}/api/activity/stats?days=${timeRange}`),
           axios.get(`${API_BASE}/api/stats`),
@@ -30,10 +84,87 @@ const Stats = () => {
           axios.get(`${API_BASE}/api/downloads`).catch(() => ({ data: [] })),
           axios.get(`${API_BASE}/api/annotations`).catch(() => ({ data: [] })),
           axios.get(`${API_BASE}/api/stats/play-counts`).catch(() => ({ data: { totalPlays: 0, totalSongsPlayed: 0, topSongs: [] } })),
+          axios.get(`${API_BASE}/api/stats/listening-history?days=${timeRange}`).catch(() => ({ data: { timeline: [], totalPlays: 0 } })),
+          axios.get(`${API_BASE}/api/stats/reading-streak`).catch(() => ({ data: { currentStreak: 0, bestStreak: 0, activeDays: 0 } })),
+          axios.get(`${API_BASE}/api/stats/library-breakdown`).catch(() => ({ data: null })),
+          axios.get(`${API_BASE}/api/stats/genre-breakdown`).catch(() => ({ data: { genres: [] } })),
+          axios.get(`${API_BASE}/api/stats/downloads-summary`).catch(() => ({ data: null })),
+          axios.get(`${API_BASE}/api/songs`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/books`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/videos`).catch(() => ({ data: [] })),
+          axios.get(`${API_BASE}/api/tags`).catch(() => ({ data: [] })),
         ]);
         setReadingStats(readingRes.data);
         setActivityStats(activityRes.data);
         setGeneralStats(generalRes.data);
+        setListeningHistory(listeningHistoryRes.data || { timeline: [], totalPlays: 0 });
+        setReadingStreak(readingStreakRes.data || {
+          currentStreak: readingRes.data?.currentStreak || 0,
+          bestStreak: readingRes.data?.bestStreak || 0,
+          activeDays: readingRes.data?.dailyReading?.length || 0
+        });
+        const songsList = Array.isArray(songsRes.data) ? songsRes.data : [];
+        const booksList = Array.isArray(booksRes.data) ? booksRes.data : [];
+        const videosList = Array.isArray(videosRes.data) ? videosRes.data : [];
+
+        const fallbackLibraryBreakdown = buildLibraryBreakdownFromCollections(songsList, booksList, videosList);
+        const backendLibraryBreakdown = libraryBreakdownRes.data;
+        const hasBackendBreakdown =
+          backendLibraryBreakdown &&
+          typeof backendLibraryBreakdown === 'object' &&
+          backendLibraryBreakdown.songsBySource;
+        setLibraryBreakdown(hasBackendBreakdown ? backendLibraryBreakdown : fallbackLibraryBreakdown);
+
+        const backendGenres = genreBreakdownRes.data?.genres || [];
+        if (backendGenres.length > 0) {
+          setGenreBreakdown({ genres: backendGenres });
+        } else {
+          const tags = Array.isArray(tagsRes.data) ? tagsRes.data : [];
+          const tagContents = await Promise.all(
+            tags.map((tag) =>
+              axios
+                .get(`${API_BASE}/api/tags/${tag.id}/content`)
+                .then((res) => ({ tag, content: Array.isArray(res.data) ? res.data : [] }))
+                .catch(() => ({ tag, content: [] }))
+            )
+          );
+
+          const map = new Map();
+          const ensureGenre = (name, color = '#00f2ff') => {
+            const key = String(name || '').trim().toLowerCase();
+            if (!key) return null;
+            const existing = map.get(key) || { name: String(name).trim(), color, songs: 0, books: 0, videos: 0, total: 0 };
+            if (!map.has(key)) map.set(key, existing);
+            return existing;
+          };
+
+          tagContents.forEach(({ tag, content }) => {
+            const row = ensureGenre(tag?.name, tag?.color || '#00f2ff');
+            if (!row) return;
+            content.forEach((item) => {
+              if (item.content_type === 'song') row.songs += 1;
+              else if (item.content_type === 'book') row.books += 1;
+              else if (item.content_type === 'video') row.videos += 1;
+              row.total += 1;
+            });
+          });
+
+          videosList.forEach((video) => {
+            String(video?.genres || '')
+              .split(',')
+              .map((g) => g.trim())
+              .filter(Boolean)
+              .forEach((genreName) => {
+                const row = ensureGenre(genreName, '#00f2ff');
+                if (!row) return;
+                row.videos += 1;
+                row.total += 1;
+              });
+          });
+
+          const genres = Array.from(map.values()).sort((a, b) => b.total - a.total).slice(0, 20);
+          setGenreBreakdown({ genres });
+        }
         setPlayCountStats(playCountsRes.data || { totalPlays: 0, totalSongsPlayed: 0, topSongs: [] });
         const favorites = Array.isArray(favoritesRes.data) ? favoritesRes.data : [];
         setFavoritesStats({
@@ -43,11 +174,16 @@ const Stats = () => {
           videos: favorites.filter((f) => f.content_type === 'video').length,
         });
         const downloads = Array.isArray(downloadsRes.data) ? downloadsRes.data : [];
-        setDownloadsStats({
+        const fallbackDownloads = {
           active: downloads.filter((d) => d.status === 'downloading' || d.status === 'pending').length,
           completed: downloads.filter((d) => d.status === 'completed').length,
           failed: downloads.filter((d) => d.status === 'failed').length,
-        });
+          lifetimeDownloads: downloads.filter((d) => d.status === 'completed').length
+        };
+        setDownloadsStats(downloadSummaryRes.data ? {
+          ...fallbackDownloads,
+          ...downloadSummaryRes.data
+        } : fallbackDownloads);
         const annotations = Array.isArray(annotationsRes.data) ? annotationsRes.data : [];
         setAnnotationStats({
           total: annotations.length,
@@ -96,7 +232,7 @@ const Stats = () => {
             <div key={i} className="flex-1 flex flex-col items-center gap-1">
               <div
                 className="w-full bg-primary/60 rounded-t transition-all hover:bg-primary"
-                style={{ height: `${(d.value / maxValue) * 100}%`, minHeight: d.value > 0 ? '4px' : '0' }}
+                style={{ height: `${(Number(d.value || 0) / maxValue) * 100}%`, minHeight: Number(d.value || 0) > 0 ? '4px' : '0' }}
               />
               <span className="text-[8px] text-white/30">{d.label}</span>
             </div>
@@ -129,6 +265,11 @@ const Stats = () => {
       value: d.count || 0,
       label: new Date(d.date).getDate()
     })).reverse();
+
+  const listeningTrendData = (listeningHistory?.timeline || []).map((d) => ({
+    value: d.plays || 0,
+    label: new Date(d.date).getDate()
+  }));
 
   return (
     <div className="page-shell">
@@ -210,8 +351,8 @@ const Stats = () => {
           <StatCard
             icon={DownloadCloud}
             label="Downloads Done"
-            value={downloadsStats.completed}
-            subValue={`${downloadsStats.active} active • ${downloadsStats.failed} failed`}
+            value={downloadsStats.lifetimeDownloads || downloadsStats.completed}
+            subValue={`${downloadsStats.completed} queue completed • ${downloadsStats.active} active • ${downloadsStats.failed} failed`}
           />
           <StatCard
             icon={Calendar}
@@ -249,8 +390,8 @@ const Stats = () => {
           <StatCard
             icon={Flame}
             label="Reading Streak"
-            value={`${readingStats?.currentStreak || 0} days`}
-            subValue="Keep it up!"
+            value={`${readingStreak?.currentStreak ?? readingStats?.currentStreak ?? 0} days`}
+            subValue={`Best: ${readingStreak?.bestStreak ?? readingStats?.bestStreak ?? 0} days`}
           />
         </div>
 
@@ -310,11 +451,23 @@ const Stats = () => {
             value={playCountStats?.totalSongsPlayed || 0}
             subValue="all-time unique"
           />
+          <StatCard
+            icon={Calendar}
+            label="Window Plays"
+            value={listeningHistory?.totalPlays || 0}
+            subValue={`last ${timeRange} days`}
+          />
+          <StatCard
+            icon={Flame}
+            label="Active Reading Days"
+            value={readingStreak?.activeDays || 0}
+            subValue="all-time"
+          />
         </div>
 
         {/* Listening Chart */}
         <div className="card p-6">
-          <MiniBarChart data={listeningChartData} label="Songs played per day" />
+          <MiniBarChart data={listeningTrendData.length ? listeningTrendData : listeningChartData} label="Songs played per day" />
         </div>
 
         {/* Top Songs */}
@@ -373,6 +526,69 @@ const Stats = () => {
             </p>
             <p className="tech-label mt-2">Not Started</p>
           </div>
+        </div>
+      </section>
+
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <BarChart3 size={20} className="text-primary" />
+          Library Statistics
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <StatCard
+            icon={Music}
+            label="Local Songs"
+            value={libraryBreakdown?.songsBySource?.local || 0}
+            subValue={`YouTube: ${libraryBreakdown?.songsBySource?.youtube || 0}`}
+          />
+          <StatCard
+            icon={BookOpen}
+            label="Local Books"
+            value={libraryBreakdown?.booksBySource?.local || 0}
+            subValue={`External: ${libraryBreakdown?.booksBySource?.external || 0}`}
+          />
+          <StatCard
+            icon={Film}
+            label="Anime Entries"
+            value={libraryBreakdown?.videosByType?.anime || 0}
+            subValue={`Movies: ${libraryBreakdown?.videosByType?.movie || 0}`}
+          />
+          <StatCard
+            icon={Target}
+            label="Reading Completed"
+            value={libraryBreakdown?.readingProgress?.completed || 0}
+            subValue={`In progress: ${libraryBreakdown?.readingProgress?.inProgress || 0}`}
+          />
+        </div>
+      </section>
+
+      <section className="space-y-6">
+        <h2 className="heading-sm flex items-center gap-3">
+          <PieChart size={20} className="text-pink-400" />
+          Genre Breakdown
+        </h2>
+        <div className="card p-6 space-y-3">
+          {(genreBreakdown?.genres || []).length === 0 ? (
+            <p className="tech-label-sm">No genre data yet. Add tags/genres to books/videos to populate this section.</p>
+          ) : (
+            genreBreakdown.genres.slice(0, 10).map((genre, index) => (
+              <div key={`${genre.name}-${index}`} className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-white">{genre.name}</span>
+                  <span className="text-white/60">{genre.total}</span>
+                </div>
+                <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.max(5, Math.round((genre.total / Math.max(genreBreakdown.genres[0]?.total || 1, 1)) * 100))}%`,
+                      background: genre.color || 'var(--color-primary)'
+                    }}
+                  />
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </section>
     </div>
