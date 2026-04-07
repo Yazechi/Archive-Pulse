@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { useMusic } from '../context/useMusic';
 import { useToast } from '../context/ToastContext';
 import { Search as SearchIcon, Play, Plus, BookOpen, ExternalLink, Activity } from 'lucide-react';
+import DropdownSelect from '../components/DropdownSelect';
 
 const Search = () => {
   const [query, setQuery] = useState('');
@@ -12,8 +13,21 @@ const Search = () => {
   const [duplicateIds, setDuplicateIds] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [filterText, setFilterText] = useState('');
+  const [hideDuplicates, setHideDuplicates] = useState(false);
+  const [onlyWithCover, setOnlyWithCover] = useState(false);
+  const [durationFilter, setDurationFilter] = useState('all');
   const { playTrack, toggleMainPlayer } = useMusic();
   const toast = useToast();
+
+  const parseDurationSeconds = (duration) => {
+    if (!duration || typeof duration !== 'string' || !duration.includes(':')) return 0;
+    const parts = duration.split(':').map((v) => Number(v));
+    if (parts.some((v) => Number.isNaN(v))) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+  };
 
   const fetchResults = async (searchQuery, searchType, selectedProvider = 'all') => {
     setLoading(true);
@@ -56,6 +70,25 @@ const Search = () => {
     setProvider(defaultProvider);
     fetchResults(query, type, defaultProvider);
   }, [type]);
+
+  const filteredResults = useMemo(() => {
+    const normalized = filterText.trim().toLowerCase();
+    return results.filter((item) => {
+      if (hideDuplicates && duplicateIds.has(item.id)) return false;
+      if (onlyWithCover && !item.thumbnail_url) return false;
+      if (normalized) {
+        const haystack = `${item.title || ''} ${item.artist || ''} ${item.author || ''} ${item.source_name || ''}`.toLowerCase();
+        if (!haystack.includes(normalized)) return false;
+      }
+      if (type === 'music' && durationFilter !== 'all') {
+        const seconds = parseDurationSeconds(item.duration);
+        if (durationFilter === 'short' && seconds >= 180) return false;
+        if (durationFilter === 'medium' && (seconds < 180 || seconds > 480)) return false;
+        if (durationFilter === 'long' && seconds <= 480) return false;
+      }
+      return true;
+    });
+  }, [results, filterText, hideDuplicates, onlyWithCover, type, durationFilter, duplicateIds]);
 
   const addToCollection = async (item) => {
     try {
@@ -134,6 +167,44 @@ const Search = () => {
         </button>
       </form>
 
+      <div className="mt-5 mb-6 section-card p-4 md:p-5 flex flex-col gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <input
+            type="text"
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            placeholder="Filter current results by title, creator, or source..."
+            className="input"
+          />
+          {type === 'music' ? (
+            <DropdownSelect
+              value={durationFilter}
+              onChange={setDurationFilter}
+              options={[
+                { value: 'all', label: 'All durations' },
+                { value: 'short', label: 'Short (< 3 min)' },
+                { value: 'medium', label: 'Medium (3-8 min)' },
+                { value: 'long', label: 'Long (> 8 min)' },
+              ]}
+            />
+          ) : (
+            <div className="flex items-center gap-3 text-xs text-white/70 px-3">
+              Filters apply to current {type} results
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-4 text-xs text-white/70">
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={hideDuplicates} onChange={(e) => setHideDuplicates(e.target.checked)} />
+            Hide duplicates
+          </label>
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={onlyWithCover} onChange={(e) => setOnlyWithCover(e.target.checked)} />
+            Cover only
+          </label>
+        </div>
+      </div>
+
       {loading ? (
         <div className="py-40 flex flex-col items-center gap-6 opacity-20">
           <Activity size={64} className="animate-spin" />
@@ -141,7 +212,7 @@ const Search = () => {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {results.map((item, i) => (
+          {filteredResults.map((item, i) => (
             <div key={item.id} className="card-interactive p-5 rounded-2xl flex items-center gap-5 group animate-in" style={{ animationDelay: `${i * 0.05}s` }}>
               <div className="w-24 h-24 rounded-2xl border border-white/10 shrink-0 relative overflow-hidden bg-zinc-900 shadow-xl">
                 <img src={item.thumbnail_url} className="w-full h-full object-cover opacity-60 grayscale group-hover:opacity-100 group-hover:grayscale-0 transition-all duration-700" alt="" />

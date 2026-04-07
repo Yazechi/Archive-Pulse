@@ -36,7 +36,7 @@ const pool = mysql.createPool({
 });
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, file.fieldname === 'music' ? musicUploadDir : booksUploadDir),
+  destination: (req, file, cb) => cb(null, (file.fieldname === 'music' || file.fieldname === 'music_files') ? musicUploadDir : booksUploadDir),
   filename: (req, file, cb) => cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname))
 });
 const upload = multer({ storage });
@@ -852,30 +852,63 @@ app.post('/api/songs/add', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const createSongFromUpload = async (file, { title, artist } = {}) => {
+  const filePath = file.path;
+  const meta = await extractMusicMetadata(filePath);
+  const resolvedTitle = title || meta?.title || file.originalname;
+  const resolvedArtist = artist || meta?.artist || 'Unknown';
+  await pool.query(
+    'INSERT INTO songs (title, artist, album, duration, source, source_id, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [
+      resolvedTitle,
+      resolvedArtist,
+      meta?.album || 'Unknown',
+      meta?.duration || 'N/A',
+      'local',
+      file.filename,
+      meta?.thumbnail_url || null
+    ]
+  );
+  return { title: resolvedTitle, artist: resolvedArtist, filename: file.originalname };
+};
+
 app.post('/api/upload/music', upload.single('music'), async (req, res) => {
   try {
     const { title, artist } = req.body;
-    const filePath = req.file.path;
-    
-    // Auto-extract metadata
-    const meta = await extractMusicMetadata(filePath);
-    
-    await pool.query(
-      'INSERT INTO songs (title, artist, album, duration, source, source_id, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [
-        title || meta?.title || req.file.originalname, 
-        artist || meta?.artist || 'Unknown', 
-        meta?.album || 'Unknown',
-        meta?.duration || 'N/A',
-        'local', 
-        req.file.filename,
-        meta?.thumbnail_url || null
-      ]
-    );
+    await createSongFromUpload(req.file, { title, artist });
     res.json({ success: true });
   } catch (err) { 
     console.error('Music upload error:', err.message);
     res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.post('/api/upload/music/bulk', upload.array('music_files', 100), async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'No music files provided' });
+    }
+    const { artist } = req.body;
+    const results = [];
+    for (const file of files) {
+      try {
+        const created = await createSongFromUpload(file, { artist });
+        results.push({ status: 'success', file: file.originalname, title: created.title });
+      } catch (err) {
+        results.push({ status: 'failed', file: file.originalname, error: err.message });
+      }
+    }
+    const successCount = results.filter((r) => r.status === 'success').length;
+    const failedCount = results.length - successCount;
+    res.status(failedCount > 0 ? 207 : 200).json({
+      success: failedCount === 0,
+      successCount,
+      failedCount,
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -984,6 +1017,26 @@ app.post('/api/songs/:id/play', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.put('/api/songs/:id/metadata', async (req, res) => {
+  const { id } = req.params;
+  const { title, artist, album, duration } = req.body;
+  try {
+    const updates = [];
+    const values = [];
+    if (title !== undefined) { updates.push('title = ?'); values.push(title); }
+    if (artist !== undefined) { updates.push('artist = ?'); values.push(artist); }
+    if (album !== undefined) { updates.push('album = ?'); values.push(album); }
+    if (duration !== undefined) { updates.push('duration = ?'); values.push(duration); }
+    if (updates.length === 0) return res.status(400).json({ error: 'No metadata fields provided' });
+    values.push(id);
+    const [result] = await pool.query(`UPDATE songs SET ${updates.join(', ')} WHERE id = ?`, values);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Song not found' });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/songs/smart/recently-added', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM songs ORDER BY created_at DESC LIMIT 20');
@@ -1065,53 +1118,91 @@ app.post('/api/books/add', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const createBookFromUpload = async (file, payload = {}) => {
+  const { title, author, type, series_id, volume_number, genres } = payload;
+  const filename = file.filename;
+  const filePath = file.path;
+  let thumbnail_url = null;
+
+  if (filename.toLowerCase().endsWith('.epub')) {
+    thumbnail_url = await extractEpubCover(filePath, filename);
+  } else if (filename.toLowerCase().endsWith('.cbz')) {
+    thumbnail_url = await extractCbzCover(filePath, filename);
+  }
+
+  const [insertResult] = await pool.query(
+    'INSERT INTO books (title, author, type, source, source_url, thumbnail_url, series_id, volume_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [
+      title || file.originalname,
+      author || 'Unknown',
+      type || 'book',
+      'local',
+      filename,
+      thumbnail_url,
+      series_id ? parseInt(series_id) : null,
+      volume_number ? parseFloat(volume_number) : null
+    ]
+  );
+
+  const bookId = insertResult.insertId;
+  const parsedGenres = String(genres || '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+
+  for (const genreName of parsedGenres) {
+    let [tagRows] = await pool.query('SELECT id FROM tags WHERE name = ? LIMIT 1', [genreName]);
+    let tagId = tagRows[0]?.id;
+    if (!tagId) {
+      const [tagResult] = await pool.query('INSERT INTO tags (name, color) VALUES (?, ?)', [genreName, '#00f2ff']);
+      tagId = tagResult.insertId;
+    }
+    await pool.query(
+      'INSERT INTO content_tags (tag_id, content_type, content_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE tag_id=tag_id',
+      [tagId, 'book', bookId]
+    );
+  }
+
+  return { id: bookId, title: title || file.originalname, filename: file.originalname };
+};
+
 app.post('/api/upload/book', upload.single('book'), async (req, res) => {
   try {
-    const { title, author, type, series_id, volume_number, genres } = req.body;
-    const filename = req.file.filename;
-    const filePath = req.file.path;
-    let thumbnail_url = null;
-
-    if (filename.toLowerCase().endsWith('.epub')) {
-      thumbnail_url = await extractEpubCover(filePath, filename);
-    } else if (filename.toLowerCase().endsWith('.cbz')) {
-      thumbnail_url = await extractCbzCover(filePath, filename);
-    }
-
-    const [insertResult] = await pool.query(
-      'INSERT INTO books (title, author, type, source, source_url, thumbnail_url, series_id, volume_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [
-        title || req.file.originalname, 
-        author || 'Unknown', 
-        type || 'book', 
-        'local', 
-        filename, 
-        thumbnail_url,
-        series_id ? parseInt(series_id) : null,
-        volume_number ? parseFloat(volume_number) : null
-      ]
-    );
-
-    const bookId = insertResult.insertId;
-    const parsedGenres = String(genres || '')
-      .split(',')
-      .map((g) => g.trim())
-      .filter(Boolean);
-
-    for (const genreName of parsedGenres) {
-      let [tagRows] = await pool.query('SELECT id FROM tags WHERE name = ? LIMIT 1', [genreName]);
-      let tagId = tagRows[0]?.id;
-      if (!tagId) {
-        const [tagResult] = await pool.query('INSERT INTO tags (name, color) VALUES (?, ?)', [genreName, '#00f2ff']);
-        tagId = tagResult.insertId;
-      }
-      await pool.query(
-        'INSERT INTO content_tags (tag_id, content_type, content_id) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE tag_id=tag_id',
-        [tagId, 'book', bookId]
-      );
-    }
-
+    await createBookFromUpload(req.file, req.body);
     res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/upload/book/bulk', upload.array('book_files', 100), async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'No book files provided' });
+    }
+    const { author, type, series_id, volume_number, genres } = req.body;
+    const results = [];
+    for (const file of files) {
+      try {
+        const created = await createBookFromUpload(file, {
+          author,
+          type,
+          series_id,
+          volume_number,
+          genres
+        });
+        results.push({ status: 'success', file: file.originalname, id: created.id, title: created.title });
+      } catch (err) {
+        results.push({ status: 'failed', file: file.originalname, error: err.message });
+      }
+    }
+    const successCount = results.filter((r) => r.status === 'success').length;
+    const failedCount = results.length - successCount;
+    res.status(failedCount > 0 ? 207 : 200).json({
+      success: failedCount === 0,
+      successCount,
+      failedCount,
+      results
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

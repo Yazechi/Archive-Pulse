@@ -5,6 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { useNavigate } from 'react-router-dom';
 import { Trash2, Plus, ListPlus, RefreshCcw, Shuffle, CheckSquare, Square, X, Play } from 'lucide-react';
 import { FavoriteButton, useFavorites } from '../components/FavoriteButton';
+import DropdownSelect from '../components/DropdownSelect';
 
 const Music = () => {
   const [songs, setSongs] = useState([]);
@@ -14,6 +15,9 @@ const Music = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [selectedSong, setSelectedSong] = useState(null);
+  const [editingSong, setEditingSong] = useState(null);
+  const [editSongForm, setEditSongForm] = useState({ title: '', artist: '', album: '', duration: '' });
+  const [sortBy, setSortBy] = useState('created_desc');
   const [isBatchMode, setIsBatchMode] = useState(false);
   const [selectedSongs, setSelectedSongs] = useState(new Set());
   const { playTrack, currentTrack, isPlaying, toggleMainPlayer } = useMusic();
@@ -88,11 +92,52 @@ const Music = () => {
     } catch (err) { toast.warning('Some artifacts already exist in sequence'); }
   };
 
+  const openEditSongModal = (song, e) => {
+    e.stopPropagation();
+    setEditSongForm({
+      title: song.title || '',
+      artist: song.artist || '',
+      album: song.album || '',
+      duration: song.duration || ''
+    });
+    setEditingSong(song);
+  };
+
+  const saveSongMetadata = async () => {
+    if (!editingSong) return;
+    try {
+      await axios.put(`http://127.0.0.1:5000/api/songs/${editingSong.id}/metadata`, editSongForm);
+      await fetchSongs();
+      toast.success('Song metadata updated');
+      setEditingSong(null);
+    } catch (err) {
+      toast.error('Failed to update song metadata');
+    }
+  };
+
+  const parseDurationSeconds = (duration) => {
+    if (!duration || typeof duration !== 'string' || !duration.includes(':')) return 0;
+    const parts = duration.split(':').map((v) => Number(v));
+    if (parts.some((v) => Number.isNaN(v))) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+  };
+
+  const sortedSongs = useMemo(() => {
+    const list = [...songs];
+    if (sortBy === 'title_asc') return list.sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    if (sortBy === 'artist_asc') return list.sort((a, b) => String(a.artist || '').localeCompare(String(b.artist || '')));
+    if (sortBy === 'duration_desc') return list.sort((a, b) => parseDurationSeconds(b.duration) - parseDurationSeconds(a.duration));
+    if (sortBy === 'play_count_desc') return list.sort((a, b) => (Number(b.play_count) || 0) - (Number(a.play_count) || 0));
+    return list.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  }, [songs, sortBy]);
+
   const visibleSongs = useMemo(() => {
     const start = Math.max(0, Math.floor(scrollTop / rowHeight) - 5);
-    const end = Math.min(songs.length, start + 15);
-    return songs.slice(start, end).map((s, i) => ({ ...s, originalIndex: start + i }));
-  }, [songs, scrollTop]);
+    const end = Math.min(sortedSongs.length, start + 15);
+    return sortedSongs.slice(start, end).map((s, i) => ({ ...s, originalIndex: start + i }));
+  }, [sortedSongs, scrollTop]);
 
   return (
     <div className="page-shell">
@@ -107,6 +152,18 @@ const Music = () => {
         </div>
         
         <div className="flex gap-4 flex-wrap">
+          <DropdownSelect
+            value={sortBy}
+            onChange={setSortBy}
+            className="min-w-[190px]"
+            options={[
+              { value: 'created_desc', label: 'Newest first' },
+              { value: 'title_asc', label: 'Title A-Z' },
+              { value: 'artist_asc', label: 'Artist A-Z' },
+              { value: 'duration_desc', label: 'Longest duration' },
+              { value: 'play_count_desc', label: 'Most played' },
+            ]}
+          />
           <button 
             onClick={() => setShowCreateModal(true)}
             className="btn-primary uppercase tracking-wider"
@@ -142,7 +199,7 @@ const Music = () => {
         </div>
 
         <div ref={listRef} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)} className="h-[60vh] overflow-y-auto custom-scrollbar">
-          <div style={{ height: `${songs.length * rowHeight}px`, position: 'relative' }}>
+          <div style={{ height: `${sortedSongs.length * rowHeight}px`, position: 'relative' }}>
             {visibleSongs.map((song) => {
               const isActive = currentTrack?.id === song.id;
               const isSelected = selectedSongs.has(song.id);
@@ -156,7 +213,7 @@ const Music = () => {
                       next.has(song.id) ? next.delete(song.id) : next.add(song.id);
                       setSelectedSongs(next);
                     } else {
-                      playTrack(song, songs);
+                      playTrack(song, sortedSongs);
                       toggleMainPlayer(true);
                     }
                   }}
@@ -191,6 +248,12 @@ const Music = () => {
                           className="p-2 rounded-md text-zinc-600 hover:text-primary hover:bg-white/5 transition-all"
                         >
                           <Plus size={16} />
+                        </button>
+                        <button
+                          onClick={(e) => openEditSongModal(song, e)}
+                          className="p-2 rounded-md text-zinc-600 hover:text-primary hover:bg-white/5 transition-all text-xs"
+                        >
+                          Edit
                         </button>
                         <button 
                           onClick={(e) => { e.stopPropagation(); deleteSong(song.id); }} 
@@ -246,6 +309,26 @@ const Music = () => {
             >
               Confirm
             </button>
+          </div>
+        </div>
+      )}
+
+      {editingSong && (
+        <div className="overlay z-[520] flex items-center justify-center p-6 animate-in">
+          <div className="modal bg-surface border-border rounded-3xl w-full max-w-lg p-8 shadow-2xl relative">
+            <button onClick={() => setEditingSong(null)} className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"><X size={22} /></button>
+            <h3 className="heading-sm mb-1">Edit Song Metadata</h3>
+            <p className="tech-label-sm mb-6">Update primary track fields</p>
+            <div className="space-y-3">
+              <input className="input" value={editSongForm.title} onChange={(e) => setEditSongForm((v) => ({ ...v, title: e.target.value }))} placeholder="Title" />
+              <input className="input" value={editSongForm.artist} onChange={(e) => setEditSongForm((v) => ({ ...v, artist: e.target.value }))} placeholder="Artist" />
+              <input className="input" value={editSongForm.album} onChange={(e) => setEditSongForm((v) => ({ ...v, album: e.target.value }))} placeholder="Album" />
+              <input className="input" value={editSongForm.duration} onChange={(e) => setEditSongForm((v) => ({ ...v, duration: e.target.value }))} placeholder="Duration (mm:ss)" />
+            </div>
+            <div className="mt-6 flex gap-3">
+              <button onClick={saveSongMetadata} className="btn-primary">Save</button>
+              <button onClick={() => setEditingSong(null)} className="btn-secondary">Cancel</button>
+            </div>
           </div>
         </div>
       )}

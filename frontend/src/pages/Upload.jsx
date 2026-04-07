@@ -3,7 +3,7 @@ import axios from 'axios';
 import { Upload as UploadIcon, CheckCircle2, AlertCircle, FileAudio, FileText } from 'lucide-react';
 
 const Upload = () => {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [type, setType] = useState('book');
   const [status, setStatus] = useState('idle'); // idle, uploading, success, error
   const [progress, setProgress] = useState(0);
@@ -11,15 +11,20 @@ const Upload = () => {
   const [author, setAuthor] = useState('');
   const [volumeNumber, setVolumeNumber] = useState('');
   const [genres, setGenres] = useState('');
+  const [uploadSummary, setUploadSummary] = useState(null);
 
   const handleUpload = async (e) => {
     e.preventDefault();
-    if (!file) return;
+    if (files.length === 0) return;
     
     setStatus('uploading');
+    setUploadSummary(null);
     const formData = new FormData();
-    const fieldName = type === 'music' ? 'music' : 'book';
-    formData.append(fieldName, file);
+    const isBulk = files.length > 1;
+    const fieldName = type === 'music' ? (isBulk ? 'music_files' : 'music') : (isBulk ? 'book_files' : 'book');
+    files.forEach((selectedFile) => {
+      formData.append(fieldName, selectedFile);
+    });
     formData.append('type', type);
     if (title.trim()) formData.append('title', title.trim());
     if (author.trim()) formData.append('author', author.trim());
@@ -27,16 +32,19 @@ const Upload = () => {
     if (genres.trim()) formData.append('genres', genres.trim());
 
     try {
-      const endpoint = type === 'music' ? '/api/upload/music' : '/api/upload/book';
-      await axios.post(`http://127.0.0.1:5000${endpoint}`, formData, {
+      const endpoint = type === 'music'
+        ? (isBulk ? '/api/upload/music/bulk' : '/api/upload/music')
+        : (isBulk ? '/api/upload/book/bulk' : '/api/upload/book');
+      const response = await axios.post(`http://127.0.0.1:5000${endpoint}`, formData, {
         onUploadProgress: (p) => setProgress(Math.round((p.loaded * 100) / p.total))
       });
       setStatus('success');
-      setFile(null);
+      setFiles([]);
       setTitle('');
       setAuthor('');
       setVolumeNumber('');
       setGenres('');
+      setUploadSummary(response.data || null);
     } catch (err) { setStatus('error'); }
   };
 
@@ -112,18 +120,33 @@ const Upload = () => {
                     {type === 'music' ? <FileAudio size={40} className="text-white/20" /> : <FileText size={40} className="text-white/20" />}
                   </div>
                   <div className="text-center">
-                    <p className="text-2xl font-display text-white">{file ? file.name : `Select ${type} artifact`}</p>
+                    <p className="text-2xl font-display text-white">
+                      {files.length === 0 ? `Select ${type} artifact(s)` : `${files.length} file${files.length > 1 ? 's' : ''} selected`}
+                    </p>
+                    {files.length > 0 && (
+                      <p className="text-xs text-white/60 mt-2 truncate max-w-[28rem] mx-auto">
+                        {files.slice(0, 2).map((f) => f.name).join(' • ')}
+                        {files.length > 2 ? ` • +${files.length - 2} more` : ''}
+                      </p>
+                    )}
                     <p className="tech-label mt-2">Max size: 500MB // Encrypted path</p>
                   </div>
                 </>
               )}
             </div>
-            <input type="file" className="hidden" onChange={(e) => { setFile(e.target.files[0]); setStatus('idle'); setProgress(0); }} />
+            <input type="file" multiple className="hidden" onChange={(e) => { setFiles(Array.from(e.target.files || [])); setStatus('idle'); setProgress(0); setUploadSummary(null); }} />
           </label>
+
+          {status === 'success' && uploadSummary?.successCount !== undefined && (
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/80">
+              Uploaded {uploadSummary.successCount} file{uploadSummary.successCount !== 1 ? 's' : ''}
+              {uploadSummary.failedCount ? `, ${uploadSummary.failedCount} failed` : ''}.
+            </div>
+          )}
 
           <button 
             type="submit" 
-            disabled={!file || status === 'uploading'}
+            disabled={files.length === 0 || status === 'uploading'}
             className="w-full btn-primary btn-lg h-16 rounded-2xl uppercase tracking-wider disabled:opacity-20 justify-center tap-press"
           >
             <UploadIcon size={20} />

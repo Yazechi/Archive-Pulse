@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useToast } from '../context/ToastContext';
 import { Play, Plus, Search as SearchIcon, RefreshCcw, Trash2, Heart, Film, Tv, X, ExternalLink } from 'lucide-react';
+import DropdownSelect from '../components/DropdownSelect';
 
 const API_BASE = 'http://127.0.0.1:5000';
 
@@ -14,6 +15,7 @@ const Videos = () => {
   const [duplicateIds, setDuplicateIds] = useState(new Set());
   const [searchLoading, setSearchLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('library'); // library, search
+  const [sortBy, setSortBy] = useState('created_desc');
   const [searchType, setSearchType] = useState('anime'); // anime, movie
   const [provider, setProvider] = useState('all');
   const [selectedVideo, setSelectedVideo] = useState(null);
@@ -191,6 +193,15 @@ const Videos = () => {
     }
   };
 
+  const sortedVideos = useMemo(() => {
+    const list = [...videos];
+    if (sortBy === 'title_asc') return list.sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    if (sortBy === 'year_desc') return list.sort((a, b) => (Number(b.release_year) || 0) - (Number(a.release_year) || 0));
+    if (sortBy === 'rating_desc') return list.sort((a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0));
+    if (sortBy === 'progress_desc') return list.sort((a, b) => (Number(b.progress) || 0) - (Number(a.progress) || 0));
+    return list.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  }, [videos, sortBy]);
+
   return (
     <div className="page-shell">
       <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-8 border-b border-border pb-8">
@@ -204,6 +215,18 @@ const Videos = () => {
         </div>
         
         <div className="flex gap-4 flex-wrap">
+          <DropdownSelect
+            value={sortBy}
+            onChange={setSortBy}
+            className="min-w-[220px]"
+            options={[
+              { value: 'created_desc', label: 'Newest first' },
+              { value: 'title_asc', label: 'Title A-Z' },
+              { value: 'year_desc', label: 'Release year (new-old)' },
+              { value: 'rating_desc', label: 'Highest rating' },
+              { value: 'progress_desc', label: 'Most progress' },
+            ]}
+          />
           <div className="flex p-1 bg-white/5 border border-white/10 rounded-xl">
             {['library', 'search'].map(tab => (
               <button
@@ -334,7 +357,7 @@ const Videos = () => {
 
       {activeTab === 'library' && (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-6">
-          {videos.map((video) => (
+          {sortedVideos.map((video) => (
             <div
               key={video.id}
               className="group cursor-pointer space-y-3"

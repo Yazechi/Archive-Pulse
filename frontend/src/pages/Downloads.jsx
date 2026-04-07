@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { 
   Download, 
@@ -153,11 +152,11 @@ const DownloadItem = ({ download, onCancel, onRetry, onRemove }) => {
 };
 
 const Downloads = () => {
-  const navigate = useNavigate();
   const toast = useToast();
   const [downloads, setDownloads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [autoProcess, setAutoProcess] = useState(() => localStorage.getItem('downloads-auto-process') !== 'false');
 
   const fetchDownloads = useCallback(async () => {
     try {
@@ -181,15 +180,19 @@ const Downloads = () => {
     return () => clearInterval(interval);
   }, [fetchDownloads]);
 
+  useEffect(() => {
+    localStorage.setItem('downloads-auto-process', String(autoProcess));
+  }, [autoProcess]);
+
   // Auto-process pending downloads
   useEffect(() => {
     const hasPending = downloads.some(d => d.status === 'pending');
     const hasDownloading = downloads.some(d => d.status === 'downloading');
     
-    if (hasPending && !hasDownloading && !processing) {
+    if (autoProcess && hasPending && !hasDownloading && !processing) {
       processNext();
     }
-  }, [downloads, processing]);
+  }, [downloads, processing, autoProcess]);
 
   const processNext = async () => {
     setProcessing(true);
@@ -254,6 +257,7 @@ const Downloads = () => {
   };
 
   const activeCount = downloads.filter(d => d.status === 'downloading' || d.status === 'pending').length;
+  const pendingCount = downloads.filter(d => d.status === 'pending').length;
   const completedCount = downloads.filter(d => d.status === 'completed').length;
   const failedCount = downloads.filter(d => d.status === 'failed').length;
 
@@ -277,6 +281,22 @@ const Downloads = () => {
         </div>
         
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setAutoProcess((value) => !value)}
+            className="btn-secondary text-sm"
+            title={autoProcess ? 'Pause automatic queue processing' : 'Resume automatic queue processing'}
+          >
+            {autoProcess ? <Pause size={14} /> : <Play size={14} />}
+            {autoProcess ? 'Pause Auto' : 'Resume Auto'}
+          </button>
+          <button
+            onClick={processNext}
+            disabled={processing || pendingCount === 0}
+            className="btn-secondary text-sm disabled:opacity-50"
+          >
+            <Play size={14} />
+            Process Next
+          </button>
           {completedCount > 0 && (
             <button onClick={clearCompleted} className="btn-secondary text-sm">
               Clear Completed
@@ -306,6 +326,12 @@ const Downloads = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {!autoProcess && pendingCount > 0 && (
+        <div className="mt-4 p-3 rounded-xl border border-yellow-500/25 bg-yellow-500/10 text-yellow-300 text-xs">
+          Queue is paused. Click <strong>Process Next</strong> to run downloads manually.
         </div>
       )}
 

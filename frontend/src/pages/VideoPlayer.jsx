@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { ChevronLeft, Play, Pause, Volume2, VolumeX, Maximize, Settings, SkipForward, SkipBack, X, List } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
+import DropdownSelect from '../components/DropdownSelect';
 
 const API_BASE = 'http://127.0.0.1:5000';
 
@@ -155,17 +156,12 @@ const VideoPlayer = () => {
           )}
           
           {sources.length > 1 && (
-            <select 
+            <DropdownSelect
               value={selectedSourceIdx}
-              onChange={(e) => setSelectedSourceIdx(Number(e.target.value))}
-              className="px-3 py-2 rounded-lg bg-white/10 text-sm text-white border border-white/20 outline-none"
-            >
-              {sources.map((src, idx) => (
-                <option key={idx} value={idx} className="bg-black text-white">
-                  Server {idx + 1}
-                </option>
-              ))}
-            </select>
+              onChange={(next) => setSelectedSourceIdx(Number(next))}
+              className="w-40"
+              options={sources.map((_, idx) => ({ value: idx, label: `Server ${idx + 1}` }))}
+            />
           )}
           
           {episodes.length > 1 && (

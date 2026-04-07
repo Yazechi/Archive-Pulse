@@ -2,8 +2,16 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Palette, Settings, BookOpen, Search, Film, DownloadCloud, History, BarChart3, Bell, Check } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
+import DropdownSelect from '../components/DropdownSelect';
 
 const COLOR_PRESETS = ['#00f2ff', '#ff4500', '#7b2ff7', '#00ff7f', '#ff00ff', '#ffffff'];
+
+const PreferenceSelect = ({ icon: Icon, label, value, options, onChange }) => (
+  <label className="space-y-2 block">
+    <span className="tech-label flex items-center gap-2"><Icon size={14} /> {label}</span>
+    <DropdownSelect value={value} options={options} onChange={onChange} />
+  </label>
+);
 
 const Profile = () => {
   const navigate = useNavigate();
@@ -36,23 +44,6 @@ const Profile = () => {
     };
     localStorage.setItem(storageMap[key], typeof value === 'boolean' ? (value ? 'on' : 'off') : value);
   };
-
-  const PreferenceSelect = ({ icon: Icon, label, value, options, onChange }) => (
-    <label className="space-y-2 block">
-      <span className="tech-label flex items-center gap-2"><Icon size={14} /> {label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-primary/40"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value} className="bg-[#121212] text-white">
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
 
   return (
     <div className="page-shell max-w-6xl mx-auto space-y-8">

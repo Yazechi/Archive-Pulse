@@ -5,6 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { Trash2, FolderPlus, RefreshCcw, CheckSquare, Square, Library, Layers, Plus, X, ArrowLeft, MessageSquareText } from 'lucide-react';
 import { TagSelector, TagBadge } from '../components/TagManager';
 import { FavoriteButton, useFavorites } from '../components/FavoriteButton';
+import DropdownSelect from '../components/DropdownSelect';
 
 const API_BASE = 'http://127.0.0.1:5000';
 const normalizeProgress = (value) => Math.max(0, Math.min(100, Number(value) || 0));
@@ -21,6 +22,7 @@ const Books = () => {
   const [showCreateSeriesModal, setShowCreateSeriesModal] = useState(false);
   const [editingBook, setEditingBook] = useState(null);
   const [editForm, setEditForm] = useState({ title: '', author: '', volume_number: '', genres: '' });
+  const [sortBy, setSortBy] = useState('created_desc');
   const [newSeries, setNewSeries] = useState({ title: '', author: '', description: '' });
   const [bookTags, setBookTags] = useState({});
   const [annotations, setAnnotations] = useState([]);
@@ -165,19 +167,29 @@ const Books = () => {
 
   // Filter logic for the main view
   const displayItems = useMemo(() => {
-    if (selectedSeries) {
-      // If a series is opened, show only its books
-      return books.filter(b => b.series_id === selectedSeries.id);
+    let filtered = selectedSeries
+      ? books.filter((b) => Number(b.series_id) === Number(selectedSeries.id))
+      : books.filter((b) => b.series_id === null);
+
+    if (!selectedSeries) {
+      if (activeTab === 'books') filtered = filtered.filter((b) => b.type !== 'manga');
+      if (activeTab === 'manga') filtered = filtered.filter((b) => b.type === 'manga');
+    }
+    
+    if (sortBy === 'title_asc') {
+      filtered = [...filtered].sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    } else if (sortBy === 'author_asc') {
+      filtered = [...filtered].sort((a, b) => String(a.author || '').localeCompare(String(b.author || '')));
+    } else if (sortBy === 'progress_desc') {
+      filtered = [...filtered].sort((a, b) => (Number(b.progress) || 0) - (Number(a.progress) || 0));
+    } else if (sortBy === 'volume_asc') {
+      filtered = [...filtered].sort((a, b) => (Number(a.volume_number) || 0) - (Number(b.volume_number) || 0));
+    } else {
+      filtered = [...filtered].sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
     }
 
-    // Main view: show books NOT in a series AND series cards themselves
-    let filtered = books.filter(b => b.series_id === null);
-    
-    if (activeTab === 'books') filtered = filtered.filter(b => b.type !== 'manga');
-    if (activeTab === 'manga') filtered = filtered.filter(b => b.type === 'manga');
-    
     return filtered;
-  }, [books, selectedSeries, activeTab]);
+  }, [books, selectedSeries, activeTab, sortBy]);
 
   const showSeriesGrid = !selectedSeries && (activeTab === 'all' || activeTab === 'series');
 
@@ -211,6 +223,18 @@ const Books = () => {
         </div>
         
         <div className="flex gap-4 flex-wrap">
+          <DropdownSelect
+            value={sortBy}
+            onChange={setSortBy}
+            className="min-w-[190px]"
+            options={[
+              { value: 'created_desc', label: 'Newest first' },
+              { value: 'title_asc', label: 'Title A-Z' },
+              { value: 'author_asc', label: 'Author A-Z' },
+              { value: 'progress_desc', label: 'Highest progress' },
+              { value: 'volume_asc', label: 'Volume ascending' },
+            ]}
+          />
           {!selectedSeries && (
               <button onClick={() => setShowCreateSeriesModal(true)} className="btn-secondary uppercase tracking-wider">
                 <Plus size={16} /> Create Series
